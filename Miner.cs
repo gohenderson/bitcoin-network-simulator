@@ -50,27 +50,29 @@ namespace BitcoinNetworkSimulator
         public int HashPower { get; }
         public string Label => Id;
 
-        private readonly int _port;
+        private readonly int _serverPort;
         private readonly NodeRole _role;
         private readonly Blockchain _chain;
         private readonly ConcurrentQueue<Transaction> _mempool;
-        private readonly Func<List<int>> _getPeerPorts;
         private readonly Func<List<string>> _getAllNodeIds;
         private readonly ChainWatcher _watcher;
         private readonly ECDsa _signingKey;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly Random _rng = new(Guid.NewGuid().GetHashCode());
 
-        public SoloMiner(string id, int port, NodeRole role, int hashPower, Blockchain chain, ConcurrentQueue<Transaction> mempool,
-            Func<List<int>> getPeerPorts, Func<List<string>> getAllNodeIds, ChainWatcher watcher, ECDsa signingKey)
+        // `serverPort` is the single port the whole network's NetworkServer
+        // listens on (see NetworkServer.cs) — every peer URL this miner
+        // builds is http://localhost:{serverPort}/{peerId}/... — not a
+        // per-node port anymore.
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+            Func<List<string>> getAllNodeIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
-            _port = port;
+            _serverPort = serverPort;
             _role = role;
             HashPower = Math.Max(1, hashPower);
             _chain = chain;
             _mempool = mempool;
-            _getPeerPorts = getPeerPorts;
             _getAllNodeIds = getAllNodeIds;
             _watcher = watcher;
             _signingKey = signingKey;
@@ -254,11 +256,11 @@ namespace BitcoinNetworkSimulator
                 Console.WriteLine($"[{Id}] (Corruptor) mined block #{block.Index} (nonce {block.Nonce}), then tampered with it after the fact");
             }
 
-            var currentPeers = _getPeerPorts();
+            var currentPeers = _getAllNodeIds();
             var peersToNotify = currentPeers;
             if (_role == NodeRole.Withholder)
             {
-                var others = currentPeers.Where(p => p != _port).ToList();
+                var others = currentPeers.Where(p => p != Id).ToList();
                 var subsetSize = Math.Max(1, others.Count / 2);
                 peersToNotify = others.OrderBy(_ => _rng.Next()).Take(subsetSize).ToList();
                 Console.WriteLine($"[{Id}] (Withholder) mined block #{block.Index} (nonce {block.Nonce}) but only notifying {peersToNotify.Count}/{others.Count} peers");
@@ -346,7 +348,7 @@ namespace BitcoinNetworkSimulator
 
             _watcher.ObserveBuild(Id, block, _role);
             _chain.AppendTrusting(block);
-            var currentPeers = _getPeerPorts();
+            var currentPeers = _getAllNodeIds();
             await SendBlock(block, currentPeers);
             await SendChain(currentPeers);
         }
@@ -406,7 +408,7 @@ namespace BitcoinNetworkSimulator
                 // honestly.
                 _watcher.ObserveBuild(Id, blockA, _role);
                 _chain.AppendTrusting(blockA);
-                var earlyPeers = _getPeerPorts();
+                var earlyPeers = _getAllNodeIds();
                 await SendBlock(blockA, earlyPeers);
                 await SendChain(earlyPeers);
                 return;
@@ -417,8 +419,8 @@ namespace BitcoinNetworkSimulator
             _watcher.ObserveBuild(Id, blockB, _role);
             _chain.AppendTrusting(blockA);
 
-            var currentPeers = _getPeerPorts();
-            var others = currentPeers.Where(p => p != _port).OrderBy(_ => _rng.Next()).ToList();
+            var currentPeers = _getAllNodeIds();
+            var others = currentPeers.Where(p => p != Id).OrderBy(_ => _rng.Next()).ToList();
             var half1 = others.Take(others.Count / 2).ToList();
             var half2 = others.Skip(others.Count / 2).ToList();
 
@@ -430,48 +432,48 @@ namespace BitcoinNetworkSimulator
             await SendChain(currentPeers);
         }
 
-        private async Task SendBlock(Block block, IEnumerable<int> peerPorts)
+        private async Task SendBlock(Block block, IEnumerable<string> peerIds)
         {
             var json = JsonSerializer.Serialize(block);
-            foreach (var peerPort in peerPorts)
+            foreach (var peerId in peerIds)
             {
-                if (peerPort == _port) continue;
+                if (peerId == Id) continue;
                 try
                 {
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await _http.PostAsync($"http://localhost:{peerPort}/receiveBlock", content);
+                    var response = await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveBlock", content);
                     if (!response.IsSuccessStatusCode)
                     {
                         var body = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"[{Id}] peer on port {peerPort} rejected block #{block.Index}: {body}");
+                        Console.WriteLine($"[{Id}] peer {peerId} rejected block #{block.Index}: {body}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[{Id}] couldn't reach peer on port {peerPort}: {ex.Message}");
+                    Console.WriteLine($"[{Id}] couldn't reach peer {peerId}: {ex.Message}");
                 }
             }
         }
 
-        private async Task SendChain(IEnumerable<int> peerPorts)
+        private async Task SendChain(IEnumerable<string> peerIds)
         {
             var json = JsonSerializer.Serialize(_chain.Snapshot());
-            foreach (var peerPort in peerPorts)
+            foreach (var peerId in peerIds)
             {
-                if (peerPort == _port) continue;
+                if (peerId == Id) continue;
                 try
                 {
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await _http.PostAsync($"http://localhost:{peerPort}/receiveChain", content);
+                    var response = await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveChain", content);
                     if (!response.IsSuccessStatusCode)
                     {
                         var body = await response.Content.ReadAsStringAsync();
-                        Console.WriteLine($"[{Id}] peer on port {peerPort} rejected chain: {body}");
+                        Console.WriteLine($"[{Id}] peer {peerId} rejected chain: {body}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[{Id}] couldn't send chain to peer on port {peerPort}: {ex.Message}");
+                    Console.WriteLine($"[{Id}] couldn't send chain to peer {peerId}: {ex.Message}");
                 }
             }
         }

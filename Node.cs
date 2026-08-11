@@ -26,77 +26,45 @@ namespace BitcoinNetworkSimulator
     }
 
     // ------------------------------------------------------------------
-    // A "node" — an independent async worker with its own HTTP listener, its
-    // own view of the chain, and its own mempool of pending transactions.
-    // Node owns network-facing concerns only: serving HTTP requests,
-    // validating and accepting what peers send it. Mining lives entirely
-    // outside Node now, in SoloMiner/PoolMiner (see Miner.cs, PoolMiner.cs,
-    // IMiner.cs) — Program.AddNodeAsync (the composition root) constructs a
-    // Node's Chain and Mempool once and shares those same instances with that
-    // node's SoloMiner, but Node itself holds no reference to it and knows
-    // nothing about mining, roles, hash power, or pools; the round-robin
-    // scheduler talks to IMiners directly, never through Node. Incoming
-    // requests are handed to an ElasticTaskPool rather than getting an
-    // unbounded Task.Run each.
+    // A "node" — an independent view of the chain and its own mempool of
+    // pending transactions. Every node in the simulation shares a single
+    // real HTTP listener (see NetworkServer.cs), which dispatches by node
+    // id — the first path segment of a request, e.g.
+    // http://localhost:5000/000-alpha/chain — and hands the rest of the
+    // route to that node's own HandleRequestAsync below. Node itself still
+    // owns everything about what a request DOES (validating and accepting
+    // what peers send it) — just not how it physically arrives anymore.
+    // Mining lives entirely outside Node, in SoloMiner/PoolMiner (see
+    // Miner.cs, PoolMiner.cs, IMiner.cs) — Program.AddNodeAsync (the
+    // composition root) constructs a Node's Chain and Mempool once and
+    // shares those same instances with that node's SoloMiner, but Node
+    // itself holds no reference to it and knows nothing about mining,
+    // roles, hash power, or pools; the round-robin scheduler talks to
+    // IMiners directly, never through Node.
     // ------------------------------------------------------------------
 
     public class Node
     {
         public string Id { get; }
-        public int Port { get; }
         public Blockchain Chain { get; }
         public ConcurrentQueue<Transaction> Mempool { get; }
 
-        private readonly HttpListener _listener;
-        private readonly ElasticTaskPool _requestPool;
         private readonly ChainWatcher _watcher;
-        private volatile bool _running = true;
 
-        public Node(string id, int port, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher)
+        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher)
         {
             Id = id;
-            Port = port;
             Chain = chain;
             Mempool = mempool;
             _watcher = watcher;
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://localhost:{port}/");
-            _requestPool = new ElasticTaskPool($"{id}-pool", minWorkers: 2, maxWorkers: 16, scaleUpQueueThreshold: 4);
         }
 
-        public void Start()
-        {
-            _listener.Start();
-            Console.WriteLine($"[{Id}] listening on http://localhost:{Port}/");
-            _ = Task.Run(ListenLoop);
-        }
-
-        public void Stop()
-        {
-            _running = false;
-            _requestPool.Stop();
-            try { _listener.Stop(); } catch { /* ignore on shutdown */ }
-        }
-
-        private async Task ListenLoop()
-        {
-            while (_running)
-            {
-                HttpListenerContext ctx;
-                try
-                {
-                    ctx = await _listener.GetContextAsync();
-                }
-                catch (Exception)
-                {
-                    if (!_running) return;
-                    continue;
-                }
-                _requestPool.Enqueue(() => HandleRequestAsync(ctx));
-            }
-        }
-
-        private async Task HandleRequestAsync(HttpListenerContext ctx)
+        // `route` is the request path with this node's id segment already
+        // stripped off by NetworkServer — e.g. "/chain" for a request to
+        // /000-alpha/chain — so the switch below reads exactly as it did
+        // back when each node had its own listener and AbsolutePath was
+        // the whole story.
+        public async Task HandleRequestAsync(HttpListenerContext ctx, string route)
         {
             try
             {
@@ -105,7 +73,7 @@ namespace BitcoinNetworkSimulator
                 string responseBody;
                 res.ContentType = "application/json";
 
-                switch (req.Url?.AbsolutePath)
+                switch (route)
                 {
                     case "/chain":
                         responseBody = JsonSerializer.Serialize(Chain.Snapshot(),

@@ -1,229 +1,11 @@
-// BitcoinNetworkSimulator — now with REAL proof-of-work instead of a coordinator-run race.
-//
-// WHAT CHANGED FROM THE GUESS-THE-NUMBER VERSION: the target a block's hash must
-// satisfy is no longer a secret held by a central coordinator. It's a PUBLIC
-// 256-bit number, carried right in the block header (Block.Target), and every
-// node independently derives what that target SHOULD be for any given height
-// purely from public chain history (prior block timestamps) — see
-// ProofOfWork.ComputeExpectedTargetHex. That single change eliminates the need
-// for a coordinator entirely: there's no secret left for anyone to hold, so
-// there's nothing left for a referee to do. Each node now mines CONTINUOUSLY
-// and independently against its own current tip, in its own background loop,
-// and broadcasts the moment it finds a valid nonce. This closes the exact gap
-// called out in the previous version's big caveat comment.
-//
-// A pleasant side effect: because multiple nodes now race in real, unsynchronized
-// parallel time against the same public target, it's completely normal for two
-// honest nodes to find a valid block at nearly the same moment — a genuine,
-// non-malicious fork, resolved by whichever branch gets extended first (the
-// existing longest-valid-chain gossip/reorg logic, unchanged from before). This
-// is the same phenomenon discussed earlier re: real Bitcoin reorgs, now visible
-// in this toy for free, without any of the deliberately malicious NodeRoles.
-//
-// Concurrency: each node's HTTP request handling is backed by an ElasticTaskPool
-// that grows/shrinks with load. Mining is single-threaded round-robin across
-// all active nodes — node 0 gets a turn, then node 1, then node 2, etc.,
-// cycling back to 0 — so there is exactly one CPU-bound mining attempt happening
-// at any moment and no per-node background threads. A "turn" is no longer a
-// guaranteed win: see SIMULATED HASH POWER below. Nodes validate incoming blocks (correct height, correct parent hash,
-// correct expected target, hash actually satisfies that target, recomputed hash
-// matches, BuiltBy's signature verifies — see BUILTBY SIGNING below —
-// well-formed transactions) before appending, and also gossip their
-// FULL local chain after every build; a peer adopts a received chain whenever
-// it is strictly longer than its own AND shares the same genesis AND is fully
-// valid (including every block's proof-of-work) — this is how a node replaces
-// blocks it previously accepted once a longer, valid history shows up (a "reorg").
-//
-// COIN ISSUANCE: each block's winning miner is paid a coinbase reward — see
-// Economics below. It starts at 50 coins, halves every 210 blocks (toy-scaled
-// down from Bitcoin's 210,000), and the running total ever minted across the
-// whole chain is hard-capped at 21,000,000 — enforced the same way the PoW
-// target is: every node independently recomputes the expected reward for any
-// block from public chain history and rejects a mismatch. See the note at the
-// top of the Economics class for an honest arithmetic caveat: with THESE
-// particular numbers, the halving schedule's own asymptotic total is actually
-// 21,000 coins, well under the enforced 21,000,000 cap — the cap is real and
-// enforced, it just isn't the thing that ends up binding here.
-//
-// BALANCE ENFORCEMENT: every node also independently recomputes every
-// account's balance purely from public chain history (see Ledger.Compute-
-// Balances below) — the same "derive it yourself, trust nobody's claim"
-// pattern already used for PoW targets and coinbase rewards. ValidateChain
-// rejects any block containing a transaction that spends more than its
-// sender's balance at that exact point in the chain, which also transitively
-// catches double-spends (the second spend of the same coins simply finds the
-// balance already gone). Each mining node additionally pre-filters its own
-// mempool against this same simulated balance before assembling a candidate
-// block, so it doesn't waste real proof-of-work mining a block its peers
-// will just reject outright.
-//
-// SIMULATED HASH POWER: each node has a HashPower rating (default 1, meaning
-// "one regular single-hash node"). A round-robin turn is no longer an
-// unbounded search that always eventually succeeds — MineBlock now tries at
-// most HashPower nonces before giving up and handing the turn to the next
-// node. A node with HashPower 1000 therefore gets 1000 tries per turn versus
-// a regular node's 1, i.e. it mines roughly 1000x faster in the same sense a
-// real miner with 1000x the hash rate finds valid nonces 1000x more often —
-// NOT by making success deterministic, just far more probable per turn. This
-// is why ProofOfWork.InitialDifficultyShift is now tuned much lower than the
-// old "search until found" model needed: with bounded per-turn attempts, a
-// target too hard for anyone to plausibly hit within a handful of tries would
-// stall the chain before the retarget logic ever got a single block to learn
-// from. Turn ORDER is randomized too, not just fixed join order: whoever
-// happened to join earliest would otherwise always go first in every round —
-// see RoundRobinMiningLoopAsync, which reshuffles who goes first each time a
-// new block appears.
-//
-// MINING PARTICIPATION: mining is now optional per node (NodeMetadata.CanMine,
-// default true; every 3rd node defaults to false — see AssignCanMine). A
-// wallet-only node (CanMine false) is a completely normal network participant
-// otherwise: it serves /chain, /balances, and /mempool, accepts and relays
-// transactions via /tx, receives and validates blocks and chains from peers
-// exactly like anyone else, and can send or receive coins once it has a
-// balance — it simply never gets a round-robin mining turn, so it never builds
-// a block or earns a coinbase reward itself. RoundRobinMiningLoopAsync skips
-// straight over these nodes when handing out turns.
-//
-// MINING POOLS: an Honest, CanMine node can subscribe to a named pool
-// (NodeMetadata.Pool — null/empty means solo, the default). Every current
-// Honest member of the same pool has its HashPower combined into ONE shared
-// round-robin turn instead of each getting its own separate one — this is
-// what lets ten nodes with HashPower 100 each genuinely compete, as a single
-// 1000-strong entity, against one node with HashPower 1000 solo, rather than
-// just taking ten separate, individually-weaker shots at the target. A pool
-// is a PoolMiner (see PoolMiner.cs): on its turn it sums its members'
-// HashPower and picks one member at random — weighted by that member's own
-// HashPower share — to coordinate: build the candidate block, run the (now
-// much larger) nonce search, and broadcast if it wins. That coordinator's Id
-// ends up as the block's BuiltBy, purely as flavor; it has no bearing on
-// payout. The reward itself is paid to the pool's own account first
-// (coinbase To = "pool:name"), then immediately split among every current
-// member proportional to their HashPower share, as ordinary transactions
-// right after the coinbase entry in that same block. No new consensus rule is
-// needed to enforce a correct split: ValidateChain already accepts it as a
-// plain sequence of regular, balance-checked transactions spending an account
-// (the pool) that the coinbase transaction immediately before it, earlier in
-// the very same block, already credited — see BALANCE ENFORCEMENT above. Pool
-// membership itself is pure local mining configuration, like HashPower and
-// CanMine — it isn't gossiped or otherwise part of chain consensus, only the
-// resulting transactions are. Malicious NodeRoles can't pool (a Pool value on
-// a non-Honest node is ignored, and AddNodeAsync always gives it its own
-// SoloMiner turn instead of routing it into a PoolMiner) — mixing pooled
-// payouts with equivocation, impersonation, or corruption would multiply the
-// number of edge cases far out of proportion to what this toy is trying to
-// demonstrate. The round-robin scheduler treats a PoolMiner as just another
-// IMiner (see IMiner.cs) — it has no pool-specific logic of its own at all.
-//
-// BUILTBY SIGNING: every block's BuiltBy claim is now backed by a real
-// signature, not just an unverified label. Each node generates (or, on
-// restart, reloads — see PERSISTENCE & RESUME below) its own ECDSA keypair
-// the moment its SoloMiner is constructed, and immediately registers the
-// public half under its own Id in NodeIdentityRegistry — a process-wide
-// table binding names to keys, established independently of anything any
-// block claims about itself. Every block a SoloMiner mines, solo or on a
-// pool's behalf, gets signed with that same key before being broadcast.
-// ValidateChain looks up whatever key is registered for a block's BuiltBy
-// and rejects the block outright if there isn't one, or if the signature
-// doesn't verify against it. This is what finally closes the gap an
-// Impersonator relies on: it can still put any name it likes in BuiltBy, but
-// it can only sign with its own real key, and that signature will never
-// verify against the name it's framing — the deception gets caught at
-// validation, everywhere, before the reward redirection it used to pull off
-// ever sticks.
-//
-// What's still missing, by design:
-//   - mining difficulty here is tiny compared to real Bitcoin (tunable via
-//     ProofOfWork.InitialDifficultyShift) — this is a toy meant to demonstrate
-//     the MECHANISM, not to be remotely secure against a real attacker
-//
-// SCENARIO EXECUTION: how a run starts up and how long it lasts can be
-// declared up front in a scenario file (see Scenario.cs for the full format,
-// and the Scenarios/ directory for a default set covering each major feature
-// — hash power disparity, pooling, malicious roles, wallet-only nodes,
-// large-scale organic growth) instead of hand-editing metadata.json files
-// and eyeballing the clock. At startup, Main looks for a scenario.json next
-// to the executable — or a specific file passed as
-// `dotnet run -- path/to/file.json` (relative to the current directory,
-// which is why `dotnet run -- Scenarios/mining-pool-fairness.json` from the
-// project root just works) — and, if found, applies it (see
-// Program.ApplyScenarioAsync) before anything else happens: NodeGroups
-// describe the starting population as a list of {Count, NodeRole, HashPower,
-// CanMine, Pool} groups applied in order (e.g. ten plain nodes then five
-// pooled ones creates 15 total, matching how node identity is already
-// assigned positionally by join index), AutoGrowth (default true) can be set
-// false to freeze the network at exactly that count instead of also growing
-// organically, GrowthIntervalSeconds/MaxNodes optionally retune organic
-// growth's pace/cap when it stays on, and DurationSeconds automatically
-// triggers the same clean shutdown pressing Enter does once that many
-// seconds have passed (Enter still works too, to stop early). No
-// scenario.json at all reproduces the exact behavior this project always
-// had: one node, organic growth, run until Enter — except for where its
-// output goes, see RESULTS below.
-//
-// RESULTS: every run — scenario-driven or not — gets its own directory,
-// ScenarioResults/<timestamp>-<name>/ (DetermineRunRootDir, called before
-// anything else in Main), where <name> is the scenario file's name without
-// its extension, or "no-scenario" when none was used. All of that run's node
-// folders (nodes/<node-id>/, holding blockchain.json and metadata.json —
-// see PERSISTENCE & RESUME below) and its watcher-report.json land inside
-// that one timestamped folder instead of always overwriting the same nodes/
-// next to the executable, so separate runs never collide and are each
-// independently reviewable afterward. When a scenario was used,
-// DetermineRunRootDir also copies that exact scenario file, unmodified, into
-// the new result folder — so the folder is a self-contained record of both
-// what happened and exactly what configuration produced it, without having
-// to go find Scenarios/whatever.json separately (which may have since been
-// edited or deleted). One consequence of every run getting a brand new,
-// empty folder: "an existing node identity is preserved rather than
-// regenerated" (ApplyScenarioAsync's SigningKey handling) essentially never
-// has an existing file to find under this default automatic layout — it
-// only matters if something (a script, a future feature, you by hand)
-// points two separate runs at literally the same ScenarioResults folder.
-//
-// PERSISTENCE & RESUME: each node gets its own directory, nodes/<node-id>/,
-// holding two files. blockchain.json is its chain — on startup, before a
-// node starts serving traffic, it looks for its own file and — if the saved
-// chain is structurally valid, including every block's proof-of-work, and
-// shares this build's canonical genesis — resumes from it instead of
-// starting over at genesis. metadata.json holds that node's NodeRole,
-// HashPower, CanMine, and SigningKey (see BUILTBY SIGNING above) — on
-// startup a node loads whatever is already on disk there (so a role, hash
-// power, or mining-participation flag you hand-edit into the file, or that
-// got assigned on a previous run, survives a restart); only when no
-// metadata.json exists yet — or one exists but predates SigningKey — does a
-// node get fresh defaults (HashPower 1, CanMine from the pattern below, role
-// from the pattern below, a freshly generated signing key) written out.
-// Unlike the other fields, SigningKey is not meant to be hand-edited or
-// deleted once a node has mined blocks: doing so orphans every historical
-// block it signed, since the key registered for its Id on the next run would
-// no longer be the one that actually signed that history. Every persisted
-// metadata.json across all of nodes/ gets preloaded into NodeIdentityRegistry
-// before any node starts joining or resuming this run — see
-// PreloadKnownSigningKeysAsync — so a resumed chain's historical BuiltBy
-// claims can be verified regardless of which order nodes happen to (re)join
-// in.
-//
-// NODE ROLES: the network includes both honest and malicious nodes (see
-// NodeRole below), normally assigned by the pattern below but overridable per
-// node via metadata.json as described above. Equivocator now has to mine TWO separate valid blocks to
-// fork the chain — real work, not a free action like in the earlier versions —
-// which is exactly why equivocation is naturally rare and costly under real PoW.
-// Impersonator still does the same real mining work as everyone else and still
-// tries to claim a different node's identity — but now gets caught too: it can
-// only sign a block with its own real key, which never verifies against
-// whatever key is actually registered for the name it's framing (see BUILTBY
-// SIGNING above), so the block is rejected everywhere rather than redirecting
-// the reward. Corruptor tampers with a block AFTER finding a valid
-// nonce, which now gets caught TWICE over: the hash no longer matches the
-// block's contents, AND (independently) a randomly-different hash essentially
-// never still satisfies a hard target by chance. Withholder only tells some
-// peers about a new block; they catch up via the next round's full-chain gossip.
-//
-// RUN:
-//   dotnet run
-// (First run: `dotnet new console` scaffolding is already assumed if you dropped
-// this file into a project. Or just: mkdir BitcoinNetworkSimulator && cd BitcoinNetworkSimulator && dotnet
-// new console and overwrite Program.cs with this file.)
+// BitcoinNetworkSimulator: a single-process simulation of a Bitcoin-style
+// P2P network — real proof-of-work, gossip/reorg, coin issuance, balance
+// enforcement, mining pools, signed blocks, and a handful of deliberately
+// malicious node roles. See README.md for how the whole system works and
+// how to run it; the mechanism-specific comments that used to live here now
+// live next to the code they explain (ProofOfWork, Economics, Ledger,
+// Blockchain.ValidateChain, and the MINING POOLS / BUILTBY SIGNING notes in
+// Miner.cs and PoolMiner.cs).
 
 using System;
 using System.Collections.Concurrent;
@@ -895,7 +677,11 @@ namespace BitcoinNetworkSimulator
 
     public static class Program
     {
-        private const int BasePort = 5000;
+        // Every node in the network is reachable through this one shared
+        // port — see NetworkServer.cs — addressed by node id in the URL
+        // path (e.g. http://localhost:5000/000-alpha/chain) rather than one
+        // real OS port per node.
+        private const int Port = 5000;
         private const int MaxNodes = 100;
         private const int GrowthIntervalMs = 8000; // roughly double the network every 8 s — see NodeGrowthLoopAsync
         private static readonly Random Rng = new();
@@ -984,9 +770,9 @@ namespace BitcoinNetworkSimulator
         // Shared, lock-protected registry — nodes call the getters at broadcast time
         // so newly joined peers are automatically included without any wiring.
         private static readonly object NetworkLock = new();
-        private static readonly List<int> AllPorts = new();
         private static readonly List<string> AllNodeIds = new();
         private static readonly List<Node> AllNodes = new();
+        private static readonly Dictionary<string, Node> NodesById = new();
         private static readonly List<Task> PersistTasks = new();
 
         // Every currently-mining participant — one SoloMiner per non-pooled
@@ -999,13 +785,17 @@ namespace BitcoinNetworkSimulator
         // later-joining node subscribes to it, rather than creating a second,
         // competing one. Both are only ever written from AddNodeAsync's
         // single sequential call chain, guarded by NetworkLock alongside
-        // AllNodes/AllPorts/AllNodeIds since the scheduler reads AllMiners
+        // AllNodes/AllNodeIds/NodesById since the scheduler reads AllMiners
         // concurrently with node growth.
         private static readonly List<IMiner> AllMiners = new();
         private static readonly Dictionary<string, PoolMiner> PoolMinersByName = new();
 
-        private static List<int> GetAllPorts() { lock (NetworkLock) { return new List<int>(AllPorts); } }
         private static List<string> GetAllNodeIds() { lock (NetworkLock) { return new List<string>(AllNodeIds); } }
+
+        // Backs NetworkServer's request dispatch — resolves a URL path's
+        // node-id segment to the live Node that should handle it, or null
+        // for an unknown id (404).
+        private static Node? ResolveNode(string id) { lock (NetworkLock) { return NodesById.TryGetValue(id, out var node) ? node : null; } }
 
         private static string NodeDirFor(string nodeId) =>
             Path.Combine(RunRootDir, "nodes", nodeId);
@@ -1225,7 +1015,14 @@ namespace BitcoinNetworkSimulator
             Console.WriteLine("Real proof-of-work: a public, deterministically-derived target.\n");
 
             var cts = new CancellationTokenSource();
-            var watcher = new ChainWatcher(new List<int>(), new List<string>());
+            var watcher = new ChainWatcher(Port, new List<string>());
+
+            // One shared listener for the whole network — see
+            // NetworkServer.cs — dispatching every request by the node id in
+            // its URL path (ResolveNode looks it up in NodesById) rather
+            // than each node owning its own OS-level port.
+            var server = new NetworkServer(Port, ResolveNode);
+            server.Start();
 
             await PreloadKnownSigningKeysAsync();
 
@@ -1246,10 +1043,10 @@ namespace BitcoinNetworkSimulator
             var watcherTask = watcher.RunAsync(cts.Token);
             var watcherPersistTask = WatcherPersistenceLoopAsync(watcher, cts.Token);
 
-            Console.WriteLine($"Node 0 ({NodeNameFor(0)}) listening on port {BasePort}." +
+            Console.WriteLine($"All nodes share http://localhost:{Port}/ — address one by id in the path." +
                 (autoGrowthEnabled ? " Network grows automatically." : " Auto-growth disabled — network stays fixed."));
-            Console.WriteLine("Try: curl http://localhost:5000/chain");
-            Console.WriteLine("Or:  curl http://localhost:5000/balances");
+            Console.WriteLine($"Try: curl http://localhost:{Port}/{NodeNameFor(0)}/chain");
+            Console.WriteLine($"Or:  curl http://localhost:{Port}/{NodeNameFor(0)}/balances");
             Console.WriteLine("Watcher: inspect watcher-report.json for convergence/recovery history.");
 
             if (scenario?.DurationSeconds is int durationSeconds && durationSeconds > 0)
@@ -1267,9 +1064,7 @@ namespace BitcoinNetworkSimulator
             }
 
             cts.Cancel();
-            List<Node> nodeSnapshot;
-            lock (NetworkLock) { nodeSnapshot = new List<Node>(AllNodes); }
-            foreach (var node in nodeSnapshot) node.Stop();
+            server.Stop();
 
             try
             {
@@ -1286,20 +1081,18 @@ namespace BitcoinNetworkSimulator
         private static async Task AddNodeAsync(ChainWatcher watcher, CancellationToken token)
         {
             int index;
-            lock (NetworkLock) { index = AllPorts.Count; }
+            lock (NetworkLock) { index = AllNodeIds.Count; }
 
             var id = NodeNameFor(index);
-            var port = BasePort + index;
 
             Directory.CreateDirectory(NodeDirFor(id));
             var metadata = await LoadOrCreateMetadataAsync(id, index);
 
             lock (NetworkLock)
             {
-                AllPorts.Add(port);
                 AllNodeIds.Add(id);
             }
-            watcher.AddNode(port, id);
+            watcher.AddNode(id);
 
             // Composition root: Chain and Mempool are constructed once here and
             // shared between Node (which serves them over HTTP) and SoloMiner
@@ -1309,14 +1102,14 @@ namespace BitcoinNetworkSimulator
             var chain = new Blockchain();
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = ImportSigningKey(metadata.SigningKey!);
-            var soloMiner = new SoloMiner(id, port, metadata.NodeRole, metadata.HashPower, chain, mempool, GetAllPorts, GetAllNodeIds, watcher, signingKey);
-            var node = new Node(id, port, chain, mempool, watcher);
+            var soloMiner = new SoloMiner(id, Port, metadata.NodeRole, metadata.HashPower, chain, mempool, GetAllNodeIds, watcher, signingKey);
+            var node = new Node(id, chain, mempool, watcher);
             await ResumeNodeFromDiskAsync(node);
-            node.Start();
 
             lock (NetworkLock)
             {
                 AllNodes.Add(node);
+                NodesById[id] = node;
                 PersistTasks.Add(PersistenceLoopAsync(node, token));
 
                 // Deciding solo vs. pooled — and, for pools, finding or
@@ -1346,7 +1139,7 @@ namespace BitcoinNetworkSimulator
                 }
             }
 
-            Console.WriteLine($"[network] node #{index} ({id}, {metadata.NodeRole}, hashPower={metadata.HashPower}, canMine={metadata.CanMine}, pool={metadata.Pool ?? "(solo)"}) joined on port {port} — total: {index + 1}");
+            Console.WriteLine($"[network] node #{index} ({id}, {metadata.NodeRole}, hashPower={metadata.HashPower}, canMine={metadata.CanMine}, pool={metadata.Pool ?? "(solo)"}) joined at /{id}/ — total: {index + 1}");
         }
 
         // A turn that finds nothing (the common case now that MineBlock is
@@ -1515,12 +1308,11 @@ namespace BitcoinNetworkSimulator
             {
                 try
                 {
-                    var ports = GetAllPorts();
                     var nodeIds = GetAllNodeIds();
-                    if (ports.Count == 0 || nodeIds.Count == 0) { if (!await DelayOrCancelled(500, token)) break; continue; }
+                    if (nodeIds.Count == 0) { if (!await DelayOrCancelled(500, token)) break; continue; }
 
-                    var queryPort = ports[Rng.Next(ports.Count)];
-                    var chainJson = await http.GetStringAsync($"http://localhost:{queryPort}/chain", token);
+                    var queryId = nodeIds[Rng.Next(nodeIds.Count)];
+                    var chainJson = await http.GetStringAsync($"http://localhost:{Port}/{queryId}/chain", token);
                     var chain = JsonSerializer.Deserialize<List<Block>>(chainJson,
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<Block>();
                     var balances = Ledger.ComputeBalances(chain);
@@ -1535,10 +1327,10 @@ namespace BitcoinNetworkSimulator
                     var amount = Math.Min(balances[from], (decimal)Rng.Next(1, 100));
                     var tx = new Transaction { From = from, To = to, Amount = amount };
 
-                    var targetPort = ports[Rng.Next(ports.Count)];
+                    var targetId = nodeIds[Rng.Next(nodeIds.Count)];
                     var json = JsonSerializer.Serialize(tx);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    await http.PostAsync($"http://localhost:{targetPort}/tx", content, token);
+                    await http.PostAsync($"http://localhost:{Port}/{targetId}/tx", content, token);
                 }
                 catch (OperationCanceledException) { break; }
                 catch { }

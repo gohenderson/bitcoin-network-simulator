@@ -59,7 +59,9 @@ namespace BitcoinNetworkSimulator
 
     public sealed class ChainWatcher
     {
-        private List<int> _ports;
+        // Every node shares this one port (see NetworkServer.cs); a node is
+        // addressed by id in the URL path, e.g. http://localhost:5000/000-alpha/chain.
+        private readonly int _port;
         private List<string> _nodeIds;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly object _lock = new();
@@ -69,17 +71,16 @@ namespace BitcoinNetworkSimulator
         private int _reorganizationsObserved;
         private int _rejectedBlocksObserved;
 
-        public ChainWatcher(List<int> ports, List<string> nodeIds)
+        public ChainWatcher(int port, List<string> nodeIds)
         {
-            _ports = new List<int>(ports);
+            _port = port;
             _nodeIds = new List<string>(nodeIds);
         }
 
-        public void AddNode(int port, string nodeId)
+        public void AddNode(string nodeId)
         {
             lock (_lock)
             {
-                _ports.Add(port);
                 _nodeIds.Add(nodeId);
             }
         }
@@ -147,18 +148,16 @@ namespace BitcoinNetworkSimulator
 
         public async Task<WatcherSnapshot> AuditAsync(bool emitTransitions = true)
         {
-            List<int> ports;
             List<string> nodeIds;
-            lock (_lock) { ports = new List<int>(_ports); nodeIds = new List<string>(_nodeIds); }
+            lock (_lock) { nodeIds = new List<string>(_nodeIds); }
 
             var audits = new List<NodeAudit>();
 
-            for (int i = 0; i < ports.Count; i++)
+            foreach (var nodeId in nodeIds)
             {
-                var nodeId = nodeIds[i];
                 try
                 {
-                    using var response = await _http.GetAsync($"http://localhost:{ports[i]}/chain");
+                    using var response = await _http.GetAsync($"http://localhost:{_port}/{nodeId}/chain");
                     var body = await response.Content.ReadAsStringAsync();
                     if (!response.IsSuccessStatusCode)
                     {
@@ -190,7 +189,7 @@ namespace BitcoinNetworkSimulator
                 }
             }
 
-            var allValid = audits.Count == ports.Count && audits.All(a => a.StructurallyValid);
+            var allValid = audits.Count == nodeIds.Count && audits.All(a => a.StructurallyValid);
             var minHeight = audits.Count == 0 ? 0 : audits.Min(a => a.Height);
             var maxHeight = audits.Count == 0 ? 0 : audits.Max(a => a.Height);
             var distinctTips = audits.Where(a => a.StructurallyValid).Select(a => a.TipHash).Distinct().ToList();
