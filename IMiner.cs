@@ -1,7 +1,7 @@
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace NaiveChain
+namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // Common mining entry point implemented by both SoloMiner (an individual

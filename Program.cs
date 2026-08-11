@@ -1,4 +1,4 @@
-// NaiveChain — now with REAL proof-of-work instead of a coordinator-run race.
+// BitcoinNetworkSimulator — now with REAL proof-of-work instead of a coordinator-run race.
 //
 // WHAT CHANGED FROM THE GUESS-THE-NUMBER VERSION: the target a block's hash must
 // satisfy is no longer a secret held by a central coordinator. It's a PUBLIC
@@ -222,7 +222,7 @@
 // RUN:
 //   dotnet run
 // (First run: `dotnet new console` scaffolding is already assumed if you dropped
-// this file into a project. Or just: mkdir NaiveChain && cd NaiveChain && dotnet
+// this file into a project. Or just: mkdir BitcoinNetworkSimulator && cd BitcoinNetworkSimulator && dotnet
 // new console and overwrite Program.cs with this file.)
 
 using System;
@@ -240,7 +240,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace NaiveChain
+namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // Data model
@@ -1189,7 +1189,7 @@ namespace NaiveChain
 
         public static async Task Main(string[] args)
         {
-            Console.WriteLine("=== NaiveChain ===");
+            Console.WriteLine("=== BitcoinNetworkSimulator ===");
 
             // A scenario file governs this run's starting node population,
             // growth behavior, and duration — see SCENARIO EXECUTION at the

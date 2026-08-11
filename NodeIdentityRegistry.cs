@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Security.Cryptography;
 
-namespace NaiveChain
+namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // A process-wide, append-only registry binding each node's Id to the

@@ -4,7 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace NaiveChain
+namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // A mining pool: a named group of SoloMiners (see Miner.cs) that mines as

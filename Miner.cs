@@ -9,7 +9,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace NaiveChain
+namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // The mining/broadcast engine for a single node: searching for a valid
