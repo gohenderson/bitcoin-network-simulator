@@ -1,0 +1,10 @@
+{
+  "Description": "Starts at a single node and lets organic growth run unrestricted (roughly doubling every GrowthIntervalSeconds) for the full duration, capped at MaxNodes. Demonstrates NodeGrowthLoopAsync's exponential curve at scale, with a fixed, reviewable result folder instead of running forever.",
+  "DurationSeconds": 900,
+  "AutoGrowth": true,
+  "GrowthIntervalSeconds": 8,
+  "MaxNodes": 100,
+  "NodeGroups": [
+    { "Count": 1, "Role": "Honest", "HashPower": 1, "CanMine": true }
+  ]
+}
