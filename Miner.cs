@@ -25,8 +25,8 @@ namespace BitcoinNetworkSimulator
     // SoloMiner alike, so they're always looking at the same state.
     //
     // A SoloMiner mines on its own behalf (MineOneRoundAsync, satisfying
-    // IMiner — see IMiner.cs) when it isn't in a pool, but also does the
-    // actual mining work FOR a PoolMiner (see PoolMiner.cs) when chosen, by
+    // IMiner, below) when it isn't in a pool, but also does the
+    // actual mining work FOR a PoolMiner (below) when chosen, by
     // weighted random draw, to coordinate that pool's turn — MineForPoolAsync
     // is that entry point. Either way, it's this SoloMiner's own chain,
     // mempool, and network plumbing doing the work; only who the reward is
@@ -116,7 +116,7 @@ namespace BitcoinNetworkSimulator
         // Called by a PoolMiner this SoloMiner belongs to, when weighted
         // random choice (favoring higher-HashPower members) picks THIS
         // member to coordinate the pool's turn — see MINING POOLS at the top
-        // of the file and PoolMiner.cs.
+        // of the file and the PoolMiner class below.
         public async Task MineForPoolAsync(string poolLabel, int totalHashPower, IReadOnlyList<SoloMiner> members, CancellationToken token)
         {
             try
@@ -477,5 +477,96 @@ namespace BitcoinNetworkSimulator
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // A mining pool: a named group of SoloMiners (see Miner.cs) that mines as
+    // one combined IMiner instead of each member getting its own separate
+    // turn — see MINING POOLS at the top of the file. This is where all
+    // pool-specific logic lives — combining member HashPower, picking who
+    // coordinates a given turn, splitting the reward — so the round-robin
+    // scheduler (Program.RoundRobinMiningLoopAsync) never has to know a pool
+    // is anything other than one more IMiner.
+    //
+    // Membership starts with whatever's passed to the constructor and can
+    // grow afterward via AddMember as new nodes join this pool over the
+    // network's lifetime (see Program.AddNodeAsync) — the pool itself is the
+    // one place that needs to track that, precisely so nothing else has to.
+    // Reads and writes to the member list are locked because AddMember (from
+    // the node-growth loop) and MineOneRoundAsync (from the mining loop) run
+    // on independent, concurrently-executing loops.
+    // ------------------------------------------------------------------
+    public class PoolMiner : IMiner
+    {
+        public string Label { get; }
+
+        private readonly object _lock = new();
+        private readonly List<SoloMiner> _members;
+        private readonly Random _rng;
+
+        public PoolMiner(string poolName, IEnumerable<SoloMiner> initialMembers, Random rng)
+        {
+            Label = poolName;
+            _members = new List<SoloMiner>(initialMembers);
+            _rng = rng;
+        }
+
+        public void AddMember(SoloMiner member)
+        {
+            lock (_lock) { _members.Add(member); }
+        }
+
+        public async Task MineOneRoundAsync(CancellationToken token)
+        {
+            List<SoloMiner> members;
+            lock (_lock) { members = new List<SoloMiner>(_members); }
+
+            var totalHashPower = members.Sum(m => m.HashPower);
+            var coordinator = WeightedRandomMember(members, totalHashPower, _rng);
+            await coordinator.MineForPoolAsync(Label, totalHashPower, members, token);
+        }
+
+        // Picks one member at random, weighted by each member's own
+        // HashPower — this is what determines who coordinates (builds, mines,
+        // and broadcasts) this turn on the pool's behalf, and since the
+        // coordinator ends up as the block's BuiltBy, it also gives
+        // higher-HashPower members a proportionally larger share of that
+        // narrative credit.
+        private static SoloMiner WeightedRandomMember(List<SoloMiner> members, int totalHashPower, Random rng)
+        {
+            var roll = rng.Next(totalHashPower);
+            var cumulative = 0;
+            foreach (var m in members)
+            {
+                cumulative += m.HashPower;
+                if (roll < cumulative) return m;
+            }
+            return members[^1];
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Common mining entry point implemented by both SoloMiner (an individual
+    // node mining on its own, above) and PoolMiner (a named group of
+    // SoloMiners mining as one combined entity, above). The
+    // round-robin scheduler (Program.RoundRobinMiningLoopAsync) works purely
+    // in terms of IMiner and deliberately knows nothing about pools, roles,
+    // or hash power: it just orders whatever IMiners currently exist and
+    // gives each one a turn. All of that — whether a node mines solo or as
+    // part of a pool, how a pool picks who coordinates its turn, how a pool
+    // splits its reward — is decided when a miner is created (see
+    // Program.AddNodeAsync) and, for pools, inside PoolMiner itself.
+    // ------------------------------------------------------------------
+    public interface IMiner
+    {
+        // Stable identity used to key this miner's spot in the scheduler's
+        // per-block random turn order (Program.MiningOrderKeys) — a node's Id
+        // for a SoloMiner, a pool's name for a PoolMiner.
+        string Label { get; }
+
+        // Perform one mining turn: try to find a valid block and broadcast
+        // it, or return having found nothing — see SIMULATED HASH POWER at
+        // the top of the file for what "one turn" means.
+        Task MineOneRoundAsync(CancellationToken token);
     }
 }

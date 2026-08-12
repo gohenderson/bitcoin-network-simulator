@@ -5,7 +5,7 @@
 // how to run it; the mechanism-specific comments that used to live here now
 // live next to the code they explain (ProofOfWork, Economics, Ledger,
 // Blockchain.ValidateChain, and the MINING POOLS / BUILTBY SIGNING notes in
-// Miner.cs and PoolMiner.cs).
+// Miner.cs).
 
 using System;
 using System.Collections.Concurrent;

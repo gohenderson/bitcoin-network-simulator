@@ -205,7 +205,7 @@ validates each one, and reports whether the network has converged on a single
 valid tip (`Healthy`), is still settling (`Recovering`), or has a node in an
 invalid state (`InvalidState`). Every observation is written directly, as it
 happens, to `watcher.db` — a SQLite database in the run's result folder
-(`WatcherStore.cs`):
+(`WatcherStore`, in `Watcher.cs`):
 
 | Table | Contents |
 |---|---|
@@ -224,14 +224,10 @@ reconstructing reports or charting a run's progression over time.
 |---|---|
 | `Program.cs` | Entry point: network composition, round-robin mining scheduler, node growth, scenario application, persistence loops. |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
-| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole`. |
-| `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. |
-| `PoolMiner.cs` | A named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting. |
-| `IMiner.cs` | The common interface the round-robin scheduler rotates over (`SoloMiner` or `PoolMiner`). |
-| `NodeIdentityRegistry.cs` | Process-wide table binding node Ids to the public keys they sign blocks with. |
+| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole` and `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with). |
+| `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
 | `BlockchainStore.cs` | `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
-| `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. |
-| `WatcherStore.cs` | `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
+| `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader. |
 
 `Program.cs` also contains `ProofOfWork`, `Economics`, `Ledger`, and
