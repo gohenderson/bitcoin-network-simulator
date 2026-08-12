@@ -41,7 +41,7 @@ namespace BitcoinNetworkSimulator
     // could ever legitimately appear as BuiltBy in any block — and every
     // block this SoloMiner mines (solo, pooled, or either half of an
     // Equivocator's pair) gets signed with the private half before being
-    // handed off. See BUILTBY SIGNING at the top of the file.
+    // handed off. See the "Signed blocks" note in README.md.
     // ------------------------------------------------------------------
 
     public class SoloMiner : IMiner
@@ -96,7 +96,7 @@ namespace BitcoinNetworkSimulator
         // one meets the target, otherwise return control to the scheduler
         // empty-handed — this turn simply didn't win, exactly like a real
         // miner's hash budget for this slice of time coming up empty. See
-        // SIMULATED HASH POWER at the top of the file.
+        // the "Mining" note in README.md.
         public async Task MineOneRoundAsync(CancellationToken token)
         {
             try
@@ -115,8 +115,8 @@ namespace BitcoinNetworkSimulator
 
         // Called by a PoolMiner this SoloMiner belongs to, when weighted
         // random choice (favoring higher-HashPower members) picks THIS
-        // member to coordinate the pool's turn — see MINING POOLS at the top
-        // of the file and the PoolMiner class below.
+        // member to coordinate the pool's turn — see the "Mining pools" note
+        // in README.md and the PoolMiner class below.
         public async Task MineForPoolAsync(string poolLabel, int totalHashPower, IReadOnlyList<SoloMiner> members, CancellationToken token)
         {
             try
@@ -231,8 +231,8 @@ namespace BitcoinNetworkSimulator
             // Signed with THIS node's own key regardless of what builtBy
             // claims — an Impersonator can put any name it likes in the
             // block, but the signature only ever proves it came from this
-            // node's real identity, not the framed one. See BUILTBY SIGNING
-            // at the top of the file.
+            // node's real identity, not the framed one. See the "Signed
+            // blocks" note in README.md.
             block.Signature = Sign(block.Hash);
 
             if (fakeIdentity)
@@ -286,12 +286,12 @@ namespace BitcoinNetworkSimulator
         // ValidateChain already accepts it as a plain sequence of regular
         // transactions from an account (the pool) that the coinbase
         // transaction immediately before it, earlier in the same block,
-        // already credited — see BALANCE ENFORCEMENT at the top of the file.
-        // This node's own mempool/chain/network plumbing builds and
+        // already credited — see the "Balances & double-spends" note in
+        // README.md. This node's own mempool/chain/network plumbing builds and
         // broadcasts the block; BuiltBy is this node's own Id, since the
         // pool already chose this SoloMiner, by weighted random draw favoring
         // higher-HashPower members, to stand in as its coordinator for this
-        // turn — see MINING POOLS at the top of the file.
+        // turn — see the "Mining pools" note in README.md.
         private async Task MineAndBroadcastPooledAsync(string poolLabel, int totalHashPower, IReadOnlyList<SoloMiner> members, CancellationToken token)
         {
             var parent = _chain.Latest;
@@ -482,7 +482,7 @@ namespace BitcoinNetworkSimulator
     // ------------------------------------------------------------------
     // A mining pool: a named group of SoloMiners (see Miner.cs) that mines as
     // one combined IMiner instead of each member getting its own separate
-    // turn — see MINING POOLS at the top of the file. This is where all
+    // turn — see the "Mining pools" note in README.md. This is where all
     // pool-specific logic lives — combining member HashPower, picking who
     // coordinates a given turn, splitting the reward — so the round-robin
     // scheduler (Program.RoundRobinMiningLoopAsync) never has to know a pool
@@ -565,8 +565,8 @@ namespace BitcoinNetworkSimulator
         string Label { get; }
 
         // Perform one mining turn: try to find a valid block and broadcast
-        // it, or return having found nothing — see SIMULATED HASH POWER at
-        // the top of the file for what "one turn" means.
+        // it, or return having found nothing — see the "Mining" note in
+        // README.md for what "one turn" means.
         Task MineOneRoundAsync(CancellationToken token);
     }
 }

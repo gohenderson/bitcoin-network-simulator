@@ -12,8 +12,8 @@ namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // Node roles. Honest is the baseline. The others each violate exactly one of
-    // the trust assumptions this system still makes, on purpose — see the
-    // comment block at the top of the file for the full list of gaps.
+    // the trust assumptions this system still makes, on purpose — see "What
+    // this is not" in README.md for the full list of gaps.
     // ------------------------------------------------------------------
 
     public enum NodeRole

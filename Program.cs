@@ -14,7 +14,6 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -24,514 +23,6 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Data model
-    // ------------------------------------------------------------------
-
-    public class Transaction
-    {
-        public string From { get; set; } = "";
-        public string To { get; set; } = "";
-        public decimal Amount { get; set; }
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-    }
-
-    public class Block
-    {
-        public int Index { get; set; }
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-        public List<Transaction> Transactions { get; set; } = new();
-        public string PreviousHash { get; set; } = "";
-        public string Hash { get; set; } = "";
-        // The node that "won" the race and built this block.
-        public string BuiltBy { get; set; } = "";
-
-        // ECDSA signature over this block's Hash, produced with BuiltBy's own
-        // private signing key — see NodeIdentityRegistry and BUILTBY SIGNING
-        // at the top of the file. Deliberately excluded from ComputeHash's
-        // payload (it's computed FROM the hash, so including it would be
-        // circular); a node can still put any name it likes in BuiltBy, but
-        // it can only produce a Signature that verifies against the key
-        // actually registered for that name if it genuinely holds that
-        // name's private key.
-        public string Signature { get; set; } = "";
-
-        // Proof-of-work fields. Target is the PUBLIC 256-bit ceiling this block's
-        // hash must be less than or equal to — carried right in the header, so any
-        // peer can check it without asking anyone. Nonce is the value a miner
-        // searched over to find a hash meeting that target. Both are part of the
-        // hashed payload below, so tampering with either after the fact breaks the
-        // hash-integrity check during validation.
-        public string Target { get; set; } = "";
-        public long Nonce { get; set; }
-
-        public string ComputeHash()
-        {
-            var payload = $"{Index}|{Timestamp:O}|{PreviousHash}|{BuiltBy}|{Target}|{Nonce}|" +
-                          string.Join(",", Transactions.Select(t => $"{t.From}>{t.To}:{t.Amount}"));
-            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Proof-of-work math: target encoding, hash-vs-target comparison, and the
-    // deterministic retarget rule every node uses to independently compute what
-    // a block's target SHOULD be, purely from public chain history. Nobody
-    // announces or holds this as a secret — it's a pure function of data every
-    // node already has.
-    // ------------------------------------------------------------------
-
-    public static class ProofOfWork
-    {
-        // How often (in blocks) to retarget, and how long a block "should" take
-        // on average. Tuned small/fast for a toy demo, unlike Bitcoin's real
-        // 2016-block / ~2-week retarget window and 10-minute block target.
-        public const int RetargetIntervalBlocks = 10;
-        public const double TargetSecondsPerBlock = 3.0;
-
-        // Bitcoin-style clamp so a single retarget can't swing wildly in either
-        // direction, even if the last interval's timing was a fluke.
-        public const double MinAdjustmentFactor = 0.25;
-        public const double MaxAdjustmentFactor = 4.0;
-
-        // Higher = harder (lower per-attempt success probability, slower
-        // blocks). Lower = easier (faster blocks, good for a quick demo).
-        // Chosen much lower than a "search until found" model would need,
-        // because MineBlock now only gets a bounded number of attempts per
-        // turn (a node's HashPower — see SIMULATED HASH POWER at the top of
-        // the file) rather than searching indefinitely: at shift 8, a single
-        // attempt succeeds with probability 1/256, so a regular (HashPower 1)
-        // node still has a real, if modest, chance each turn, while a node
-        // with HashPower 1000 succeeds on the vast majority of its turns —
-        // exactly the "1000x more likely to win" effect simulated hash power
-        // is meant to produce.
-        public const int InitialDifficultyShift = 8;
-
-        public static readonly BigInteger MaxTarget = (BigInteger.One << 256) - 1;
-        public static readonly BigInteger InitialTarget = MaxTarget >> InitialDifficultyShift;
-
-        public static BigInteger HashToBigInteger(string hex)
-        {
-            var bytes = Convert.FromHexString(hex);
-            return new BigInteger(bytes, isUnsigned: true, isBigEndian: true);
-        }
-
-        public static string TargetToHex(BigInteger target)
-        {
-            var bytes = target.ToByteArray(isUnsigned: true, isBigEndian: true);
-            if (bytes.Length < 32)
-            {
-                var padded = new byte[32];
-                Array.Copy(bytes, 0, padded, 32 - bytes.Length, bytes.Length);
-                bytes = padded;
-            }
-            else if (bytes.Length > 32)
-            {
-                bytes = bytes[^32..];
-            }
-            return Convert.ToHexString(bytes).ToLowerInvariant();
-        }
-
-        public static bool MeetsTarget(string hashHex, string targetHex)
-        {
-            return HashToBigInteger(hashHex) <= HashToBigInteger(targetHex);
-        }
-
-        // Deterministically derives the target the NEXT block (at height =
-        // ancestors.Count) must satisfy, purely from public chain history — no
-        // secret, nothing to trust, nothing to announce. Every node computes this
-        // identically, the same way every real Bitcoin node independently
-        // recomputes the same expected difficulty from block timestamps.
-        //
-        // Known toy quirk, left in deliberately rather than engineered around:
-        // genesis has a fixed, hardcoded timestamp (see CreateGenesisBlock), so
-        // the very FIRST retarget interval spans from that fixed point to whenever
-        // you actually ran the demo — a huge apparent elapsed time. That first
-        // retarget will almost always saturate the MaxAdjustmentFactor clamp
-        // (target gets 4x easier). Every retarget after that behaves normally,
-        // based purely on real elapsed mining time between real blocks.
-        public static string ComputeExpectedTargetHex(List<Block> ancestors)
-        {
-            if (ancestors == null || ancestors.Count == 0)
-                return TargetToHex(InitialTarget);
-
-            var nextHeight = ancestors.Count;
-            var parent = ancestors[^1];
-
-            if (nextHeight < RetargetIntervalBlocks || nextHeight % RetargetIntervalBlocks != 0)
-                return parent.Target; // no adjustment due yet — inherit parent's target
-
-            var intervalStart = ancestors[nextHeight - RetargetIntervalBlocks];
-            var actualSeconds = Math.Max(1.0, (parent.Timestamp - intervalStart.Timestamp).TotalSeconds);
-            var expectedSeconds = RetargetIntervalBlocks * TargetSecondsPerBlock;
-            var ratio = Math.Clamp(actualSeconds / expectedSeconds, MinAdjustmentFactor, MaxAdjustmentFactor);
-
-            var parentTarget = HashToBigInteger(parent.Target);
-            var ratioMicros = (long)Math.Round(ratio * 1_000_000.0);
-            var scaled = parentTarget * ratioMicros / 1_000_000;
-
-            if (scaled < BigInteger.One) scaled = BigInteger.One;
-            if (scaled > MaxTarget) scaled = MaxTarget;
-
-            return TargetToHex(scaled);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Coin issuance: a coinbase transaction (From == CoinbaseSender) is how new
-    // coins enter existence, exactly one per block, paid to whoever built it.
-    // The nominal reward halves every HalvingIntervalBlocks, and the running
-    // total ever minted across the whole chain is hard-capped at MaxSupply —
-    // both computed the same deterministic way ProofOfWork.ComputeExpectedTargetHex
-    // computes its target: purely from public chain history, so every node
-    // independently verifies the SAME expected reward for any given block
-    // without trusting the builder's claim.
-    //
-    // ARITHMETIC NOTE, worth being upfront about: real Bitcoin's constants
-    // (50 coins, halving every 210,000 blocks) are tuned so the reward series
-    // converges to exactly 21,000,000: 210,000 * 50 * (1 + 1/2 + 1/4 + ...) =
-    // 210,000 * 50 * 2 = 21,000,000. Here, halving every 210 blocks (instead of
-    // 210,000 — scaled down 1000x for a fast demo) with the SAME 50-coin reward
-    // converges to only 210 * 50 * 2 = 21,000 total coins — the natural
-    // asymptotic supply is 21,000, not 21,000,000. MaxSupply below is still
-    // implemented as a real, enforced hard cap (and the check exists exactly
-    // like it would in a "real" implementation), it's just that with these
-    // particular numbers the halving schedule alone will never actually reach
-    // it — the cap is a ceiling far above what mining could ever produce. If you
-    // want the cap to actually bind, either shrink MaxSupply to match (21,000)
-    // or scale HalvingIntervalBlocks up to 210,000 to match real Bitcoin's ratio.
-    public static class Economics
-    {
-        public const string CoinbaseSender = "coinbase";
-        public const decimal InitialBlockReward = 50m;
-        public const int HalvingIntervalBlocks = 210;
-        public const decimal MaxSupply = 21_000_000m;
-
-        // Schedule-only reward for a given height, ignoring the max-supply cap.
-        public static decimal NominalBlockReward(int height)
-        {
-            if (height <= 0) return 0m; // genesis pays no reward
-
-            var halvings = height / HalvingIntervalBlocks;
-            if (halvings >= 50) return 0m; // decayed to zero long before this many halvings
-
-            var divisor = BigInteger.Pow(2, halvings);
-            return InitialBlockReward / (decimal)divisor;
-        }
-
-        // Sums every coinbase-labeled transaction across the given chain prefix —
-        // i.e. everything ever minted so far, purely from public chain data.
-        public static decimal TotalMintedSoFar(List<Block> ancestors)
-        {
-            decimal total = 0m;
-            foreach (var block in ancestors)
-                foreach (var tx in block.Transactions)
-                    if (tx.From == CoinbaseSender)
-                        total += tx.Amount;
-            return total;
-        }
-
-        // The actual reward a block at this height may claim: the schedule's
-        // nominal reward, clamped so the running total minted across the whole
-        // chain never exceeds MaxSupply.
-        public static decimal ComputeBlockReward(List<Block> ancestors, int height)
-        {
-            var nominal = NominalBlockReward(height);
-            if (nominal <= 0m) return 0m;
-
-            var mintedSoFar = TotalMintedSoFar(ancestors);
-            var remaining = MaxSupply - mintedSoFar;
-            if (remaining <= 0m) return 0m;
-
-            return nominal > remaining ? remaining : nominal;
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Balance tracking: derives every account's current balance purely from
-    // public chain history, exactly the same "recompute it yourself, don't
-    // trust a claim" pattern ProofOfWork and Economics use above. This is
-    // what lets ValidateChain (and a miner's own mempool selection) catch a
-    // sender trying to spend coins they don't have, or spend the same coins
-    // twice.
-    // ------------------------------------------------------------------
-    public static class Ledger
-    {
-        public static Dictionary<string, decimal> ComputeBalances(IEnumerable<Block> chain)
-        {
-            var balances = new Dictionary<string, decimal>();
-            foreach (var block in chain)
-            {
-                foreach (var tx in block.Transactions)
-                {
-                    if (tx.From != Economics.CoinbaseSender)
-                        balances[tx.From] = balances.GetValueOrDefault(tx.From) - tx.Amount;
-                    balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
-                }
-            }
-            return balances;
-        }
-
-        public static decimal GetBalance(IEnumerable<Block> chain, string account) =>
-            ComputeBalances(chain).GetValueOrDefault(account);
-    }
-
-    // Thread-safe append-only chain shared by the JSON persistence layer.
-    // Each "node" below keeps its OWN copy of a Blockchain to simulate a real
-    // distributed system where nodes can (and, in this naive design, do) disagree.
-    public class Blockchain
-    {
-        private readonly object _lock = new();
-        public List<Block> Blocks { get; private set; } = new();
-
-        public Blockchain()
-        {
-            Blocks.Add(CreateGenesisBlock());
-        }
-
-        // Genesis must be byte-for-byte identical across every node, or their chains
-        // can never agree on a shared "block #0" and every subsequent block gets
-        // rejected everywhere except on the node that built it. That means NO
-        // DateTime.UtcNow here — timestamps captured milliseconds apart on
-        // different nodes would hash differently and break consensus before it
-        // even starts. Genesis is exempt from proof-of-work (it's the fixed,
-        // universally-agreed starting point every node is hardcoded to trust, the
-        // same way real Bitcoin's genesis block is a checkpoint, not something
-        // your own node re-verifies by mining).
-        private static Block CreateGenesisBlock()
-        {
-            var genesis = new Block
-            {
-                Index = 0,
-                Timestamp = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
-                PreviousHash = "0",
-                BuiltBy = "genesis",
-                Target = ProofOfWork.TargetToHex(ProofOfWork.InitialTarget),
-                Nonce = 0,
-                Transactions = new List<Transaction>()
-            };
-            genesis.Hash = genesis.ComputeHash();
-            return genesis;
-        }
-
-        public Block Latest
-        {
-            get { lock (_lock) { return Blocks[^1]; } }
-        }
-
-        // Used only for the local build path (a node building its own block never
-        // needs to "validate" itself — it just appends what it made).
-        public void AppendTrusting(Block block)
-        {
-            lock (_lock)
-            {
-                Blocks.Add(block);
-            }
-        }
-
-        // Validates an incoming chain block-by-block. What this DOES catch:
-        //   - structural corruption / tampering (recomputed hash must match claimed hash)
-        //   - wrong parent (PreviousHash must match the previous block's hash)
-        //   - wrong height (Index must be sequential)
-        //   - malformed transactions (basic sanity checks)
-        //   - insufficient proof-of-work: the declared Target must match what's
-        //     independently recomputed from prior block timestamps (nobody gets
-        //     to just claim an easy target), AND the block's hash must actually
-        //     satisfy that target
-        //   - incorrect coinbase reward: at most one coinbase-labeled transaction
-        //     per block, and its amount must exactly match what every node
-        //     independently computes as the correct reward for that height,
-        //     respecting both the halving schedule and the max-supply cap
-        //   - insufficient balance / double-spends: every non-coinbase transaction
-        //     is checked against a running balance derived purely from chain
-        //     history up to that exact point (see Ledger.ComputeBalances) — a
-        //     sender can never spend more than they actually have, and a second
-        //     spend of the same coins finds the balance already gone
-        //   - a node lying about who built it: BuiltBy must have a registered
-        //     signing key (see NodeIdentityRegistry) and the block's Signature
-        //     must actually verify against that key — see BUILTBY SIGNING at
-        //     the top of the file
-        // Unlike the earlier coordinator-picked versions, being selected to build
-        // now genuinely costs something real: computational search work.
-        private static (bool Ok, string Reason) ValidateChain(List<Block> candidate)
-        {
-            if (candidate == null || candidate.Count == 0)
-                return (false, "candidate chain is empty");
-
-            if (candidate[0].Index != 0)
-                return (false, "candidate chain does not start at genesis");
-
-            // Running balance derived purely from chain history as we walk
-            // forward — this is what lets the per-transaction check below catch
-            // both an outright insufficient-balance spend and a double-spend
-            // (the second attempt simply finds the balance already gone).
-            var balances = new Dictionary<string, decimal>();
-
-            for (int i = 0; i < candidate.Count; i++)
-            {
-                var block = candidate[i];
-
-                if (block.Transactions == null)
-                    return (false, $"block #{block.Index} transactions list is null");
-
-                if (block.Index != i)
-                    return (false, $"block position {i} has index {block.Index}");
-
-                if (i == 0)
-                {
-                    if (block.PreviousHash != "0")
-                        return (false, "candidate genesis has an invalid previous hash");
-                }
-                else
-                {
-                    var previous = candidate[i - 1];
-                    if (block.PreviousHash != previous.Hash)
-                        return (false, $"block #{block.Index} has previous-hash mismatch");
-
-                    var ancestors = candidate.GetRange(0, i); // blocks 0..i-1, i.e. up through parent
-
-                    var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors);
-                    if (block.Target != expectedTarget)
-                        return (false, $"block #{block.Index} declares an incorrect target — expected {expectedTarget[..8]}..., " +
-                            $"got {(block.Target.Length >= 8 ? block.Target[..8] : block.Target)}... " +
-                            "(target must match what every node independently computes from prior block timestamps)");
-
-                    if (!ProofOfWork.MeetsTarget(block.Hash, block.Target))
-                        return (false, $"block #{block.Index} hash does not satisfy its declared target — not a valid proof of work");
-
-                    var builderKey = NodeIdentityRegistry.GetPublicKey(block.BuiltBy);
-                    if (builderKey == null)
-                        return (false, $"block #{block.Index} claims BuiltBy '{block.BuiltBy}', which has no registered signing key");
-                    if (!NodeIdentityRegistry.Verify(builderKey, block.Hash, block.Signature))
-                        return (false, $"block #{block.Index} signature does not verify against the registered key for '{block.BuiltBy}' — possible impersonation");
-
-                    var coinbaseTxs = block.Transactions.Where(t => t.From == Economics.CoinbaseSender).ToList();
-                    if (coinbaseTxs.Count > 1)
-                        return (false, $"block #{block.Index} contains {coinbaseTxs.Count} coinbase transactions — only one is allowed per block");
-
-                    var expectedReward = Economics.ComputeBlockReward(ancestors, block.Index);
-                    if (expectedReward > 0m)
-                    {
-                        if (coinbaseTxs.Count != 1)
-                            return (false, $"block #{block.Index} is missing its coinbase transaction (expected reward {expectedReward})");
-                        if (coinbaseTxs[0].Amount != expectedReward)
-                            return (false, $"block #{block.Index} coinbase amount {coinbaseTxs[0].Amount} does not match the independently computed reward {expectedReward} for this height");
-                    }
-                    else if (coinbaseTxs.Count != 0)
-                    {
-                        return (false, $"block #{block.Index} includes a coinbase transaction, but the reward at this height has decayed to zero or the {Economics.MaxSupply}-coin max supply has already been reached");
-                    }
-                }
-
-                foreach (var tx in block.Transactions)
-                {
-                    if (string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To))
-                        return (false, $"block #{block.Index} contains a transaction missing From/To");
-
-                    if (tx.Amount <= 0)
-                        return (false, $"block #{block.Index} contains a non-positive transaction amount: {tx.Amount}");
-
-                    if (tx.From == Economics.CoinbaseSender)
-                    {
-                        balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
-                    }
-                    else
-                    {
-                        var available = balances.GetValueOrDefault(tx.From);
-                        if (tx.Amount > available)
-                            return (false, $"block #{block.Index} contains a transaction spending {tx.Amount} from '{tx.From}', " +
-                                $"who only has a balance of {available} at that point in the chain — insufficient funds or a double-spend");
-
-                        balances[tx.From] = available - tx.Amount;
-                        balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
-                    }
-                }
-
-                var recomputed = block.ComputeHash();
-                if (recomputed != block.Hash)
-                    return (false, $"block #{block.Index} hash does not match its contents");
-            }
-
-            return (true, "ok");
-        }
-
-        public static (bool Ok, string Reason) ValidateSnapshot(List<Block> candidate)
-        {
-            return ValidateChain(candidate);
-        }
-
-        public (bool Ok, string Reason) TryAppend(Block block)
-        {
-            lock (_lock)
-            {
-                var tip = Blocks[^1];
-
-                if (block.Index != tip.Index + 1)
-                    return (false, $"expected index {tip.Index + 1}, got {block.Index}");
-
-                if (block.PreviousHash != tip.Hash)
-                    return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}");
-
-                var candidate = new List<Block>(Blocks) { block };
-                var validation = ValidateChain(candidate);
-                if (!validation.Ok)
-                    return validation;
-
-                Blocks.Add(block);
-                return (true, "ok");
-            }
-        }
-
-        // Fork choice rule:
-        // A valid candidate chain (including every block's proof-of-work AND
-        // coinbase correctness) replaces our current chain only when it is
-        // strictly longer. This lets a node undo blocks it previously accepted
-        // when another branch proves to be the longer valid history.
-        public (bool Replaced, string Reason) TryReplaceWithLongerChain(List<Block> candidate)
-        {
-            lock (_lock)
-            {
-                var validation = ValidateChain(candidate);
-                if (!validation.Ok)
-                    return (false, $"candidate rejected: {validation.Reason}");
-
-                if (candidate.Count <= Blocks.Count)
-                    return (false, $"candidate is not longer (candidate={candidate.Count - 1}, local={Blocks.Count - 1})");
-
-                if (candidate[0].Hash != Blocks[0].Hash)
-                    return (false, "candidate has a different genesis block");
-
-                Blocks = new List<Block>(candidate);
-                return (true, $"replaced local chain with longer chain at height {Blocks[^1].Index}");
-            }
-        }
-
-        // Used once at startup to resume a node's chain from a previously persisted
-        // snapshot on disk. Accepts the saved chain only if it's structurally valid
-        // (including every block's proof-of-work and coinbase correctness) AND
-        // shares this build's canonical genesis block.
-        public (bool Loaded, string Reason) TryLoadFrom(List<Block> candidate)
-        {
-            lock (_lock)
-            {
-                var validation = ValidateChain(candidate);
-                if (!validation.Ok)
-                    return (false, $"saved chain failed validation: {validation.Reason}");
-
-                if (candidate[0].Hash != Blocks[0].Hash)
-                    return (false, "saved chain has a different genesis than this build's canonical genesis");
-
-                Blocks = new List<Block>(candidate);
-                return (true, $"resumed at height {Blocks[^1].Index} ({Blocks.Count} block(s) loaded)");
-            }
-        }
-
-        public List<Block> Snapshot()
-        {
-            lock (_lock) { return new List<Block>(Blocks); }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Elastic worker pool: a bounded set of async worker loops pulling from a
     // shared queue. Starts with `minWorkers` running. If the backlog grows past
@@ -635,8 +126,8 @@ namespace BitcoinNetworkSimulator
         public void Stop() => _cts.Cancel();
     }
 
-    // Persisted, hand-editable per-node configuration — see PERSISTENCE & RESUME
-    // at the top of the file. Lives at nodes/<node-id>/metadata.json, alongside
+    // Persisted, hand-editable per-node configuration — see "Persistence &
+    // resume" in README.md. Lives at nodes/<node-id>/metadata.json, alongside
     // that node's blockchain.db. NodeRole is serialized as its string name
     // (not the underlying int) specifically so it's easy to read and edit by
     // hand — see Program's metadata JSON options.
@@ -649,17 +140,17 @@ namespace BitcoinNetworkSimulator
         // still does everything else a full node does — serves /chain, /tx,
         // /balances, receives and validates blocks and chains from peers, holds
         // a mempool — it just never builds a block itself, i.e. a wallet-only /
-        // relay-only participant. See MINING PARTICIPATION at the top of the file.
+        // relay-only participant. See the "Mining participation" note in README.md.
         public bool CanMine { get; set; } = true;
         // Null/empty = mines solo (default). Otherwise, the name of a mining
         // pool this node subscribes to — its HashPower is combined with every
         // other current member's into the pool's single shared turn instead of
         // getting its own. Only honored for NodeRole.Honest nodes; a malicious
         // role's Pool value, if set, is ignored and it always mines solo. See
-        // MINING POOLS at the top of the file.
+        // the "Mining pools" note in README.md.
         public string? Pool { get; set; } = null;
         // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
-        // — see BUILTBY SIGNING at the top of the file. Unlike every other
+        // — see the "Signed blocks" note in README.md. Unlike every other
         // field here, this one should never be hand-edited or deleted once a
         // node has mined blocks: doing so orphans every historical block it
         // signed, since the key registered for its Id on the next run would
@@ -763,8 +254,8 @@ namespace BitcoinNetworkSimulator
         // wallet-only (fully validates, gossips, sends/receives transactions,
         // but never gets a mining turn), so a fresh run shows a mix without any
         // manual edits. Same override rules as AssignRole — see
-        // LoadOrCreateMetadataAsync and MINING PARTICIPATION at the top of the
-        // file.
+        // LoadOrCreateMetadataAsync and the "Mining participation" note in
+        // README.md.
         private static bool AssignCanMine(int index) => index % 3 != 2;
 
         // Shared, lock-protected registry — nodes call the getters at broadcast time
@@ -835,8 +326,8 @@ namespace BitcoinNetworkSimulator
         // they're there to edit or resume from next time. SigningKey is handled
         // specially either way: a loaded metadata.json missing one (e.g. saved
         // before this field existed) gets a freshly generated key filled in and
-        // re-saved immediately, exactly as if it were brand new — see BUILTBY
-        // SIGNING at the top of the file for why that key, once established,
+        // re-saved immediately, exactly as if it were brand new — see the
+        // "Signed blocks" note in README.md for why that key, once established,
         // must never change again.
         private static async Task<NodeMetadata> LoadOrCreateMetadataAsync(string id, int index)
         {
@@ -889,12 +380,12 @@ namespace BitcoinNetworkSimulator
         // every time it's applied, the same way hand-editing metadata.json
         // already is. If a position already has metadata on disk (from a
         // previous run, scenario or otherwise), its existing SigningKey is
-        // preserved rather than regenerated — see PERSISTENCE & RESUME and
-        // BUILTBY SIGNING at the top of the file for why — so re-running the
+        // preserved rather than regenerated — see "Persistence & resume" and
+        // the "Signed blocks" note in README.md for why — so re-running the
         // same scenario keeps building on the same node identities and chain
         // history instead of resetting to genesis every time. Only a
-        // genuinely new position gets a freshly generated key. See SCENARIO
-        // EXECUTION at the top of the file.
+        // genuinely new position gets a freshly generated key. See "Scenarios"
+        // in README.md.
         private static async Task ApplyScenarioAsync(Scenario scenario)
         {
             var index = 0;
@@ -983,8 +474,8 @@ namespace BitcoinNetworkSimulator
             Console.WriteLine("=== BitcoinNetworkSimulator ===");
 
             // A scenario file governs this run's starting node population,
-            // growth behavior, and duration — see SCENARIO EXECUTION at the
-            // top of the file. `dotnet run -- path/to/scenario.json` picks a
+            // growth behavior, and duration — see "Scenarios" in README.md.
+            // `dotnet run -- path/to/scenario.json` picks a
             // specific file; otherwise scenario.json next to the executable
             // is used if present. No file at all means the normal
             // single-node, indefinite-runtime default, unchanged from before
@@ -994,7 +485,7 @@ namespace BitcoinNetworkSimulator
 
             // Every run's node folders and watcher.db land under
             // their own timestamped ScenarioResults/ subfolder from this
-            // point on — see SCENARIO EXECUTION at the top of the file.
+            // point on — see "Scenarios" in README.md.
             RunRootDir = DetermineRunRootDir(scenarioPath, scenario);
             Console.WriteLine($"Results: {RunRootDir}\n");
 
@@ -1178,8 +669,8 @@ namespace BitcoinNetworkSimulator
             return key;
         }
 
-        // Rotates across mining "turns" — see MINING PARTICIPATION and MINING
-        // POOLS at the top of the file. Deliberately knows nothing about
+        // Rotates across mining "turns" — see the "Mining participation" and
+        // "Mining pools" notes in README.md. Deliberately knows nothing about
         // solo vs. pooled mining, roles, or hash power: every entry in
         // AllMiners is just an IMiner, and whether it's a SoloMiner or a
         // PoolMiner (and, for a pool, who's currently in it) was already

@@ -182,8 +182,8 @@ structurally valid and shares this build's genesis; otherwise it starts fresh.
 except `SigningKey`, which must never change once a node has mined blocks, or
 its historical blocks can no longer be verified.
 
-Each node's `blockchain.db` (`BlockchainStore.cs`) holds its local chain
-across two tables:
+Each node's `blockchain.db` (`BlockchainStore`, in `Blockchain.cs`) holds its
+local chain across two tables:
 
 | Table | Contents |
 |---|---|
@@ -223,16 +223,12 @@ reconstructing reports or charting a run's progression over time.
 | File | Responsibility |
 |---|---|
 | `Program.cs` | Entry point: network composition, round-robin mining scheduler, node growth, scenario application, persistence loops. |
+| `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
 | `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole` and `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
-| `BlockchainStore.cs` | `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader. |
-
-`Program.cs` also contains `ProofOfWork`, `Economics`, `Ledger`, and
-`Blockchain` (validation and fork-choice logic) as static/data classes near
-the top of the file.
 
 ## What this is not
 
