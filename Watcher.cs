@@ -21,16 +21,6 @@ namespace BitcoinNetworkSimulator
         InvalidState
     }
 
-    public sealed class WatcherEvent
-    {
-        public DateTime Timestamp { get; init; } = DateTime.UtcNow;
-        public string Type { get; init; } = "";
-        public string NodeId { get; init; } = "";
-        public int? Height { get; init; }
-        public string TipHash { get; init; } = "";
-        public string Details { get; init; } = "";
-    }
-
     public sealed class NodeAudit
     {
         public string NodeId { get; init; } = "";
@@ -65,16 +55,17 @@ namespace BitcoinNetworkSimulator
         private List<string> _nodeIds;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly object _lock = new();
-        private readonly List<WatcherEvent> _events = new();
+        private readonly WatcherStore _store;
         private WatcherSnapshot? _lastSnapshot;
         private int _blocksObserved;
         private int _reorganizationsObserved;
         private int _rejectedBlocksObserved;
 
-        public ChainWatcher(int port, List<string> nodeIds)
+        public ChainWatcher(int port, List<string> nodeIds, WatcherStore store)
         {
             _port = port;
             _nodeIds = new List<string>(nodeIds);
+            _store = store;
         }
 
         public void AddNode(string nodeId)
@@ -90,30 +81,17 @@ namespace BitcoinNetworkSimulator
             lock (_lock)
             {
                 _blocksObserved++;
-                _events.Add(new WatcherEvent
-                {
-                    Type = "block-built",
-                    NodeId = nodeId,
-                    Height = block.Index,
-                    TipHash = block.Hash,
-                    Details = $"role={role}, builtBy={block.BuiltBy}, nonce={block.Nonce}, txs={block.Transactions.Count}"
-                });
             }
+            _store.InsertEvent(DateTime.UtcNow, "block-built", nodeId,
+                height: block.Index, tipHash: block.Hash,
+                role: role.ToString(), builtBy: block.BuiltBy,
+                nonce: block.Nonce, txCount: block.Transactions.Count);
         }
 
         public void ObserveAccepted(string nodeId, Block block)
         {
-            lock (_lock)
-            {
-                _events.Add(new WatcherEvent
-                {
-                    Type = "block-accepted",
-                    NodeId = nodeId,
-                    Height = block.Index,
-                    TipHash = block.Hash,
-                    Details = $"builtBy={block.BuiltBy}"
-                });
-            }
+            _store.InsertEvent(DateTime.UtcNow, "block-accepted", nodeId,
+                height: block.Index, tipHash: block.Hash, builtBy: block.BuiltBy);
         }
 
         public void ObserveRejected(string nodeId, Block block, string reason)
@@ -121,15 +99,9 @@ namespace BitcoinNetworkSimulator
             lock (_lock)
             {
                 _rejectedBlocksObserved++;
-                _events.Add(new WatcherEvent
-                {
-                    Type = "block-rejected",
-                    NodeId = nodeId,
-                    Height = block.Index,
-                    TipHash = block.Hash,
-                    Details = reason
-                });
             }
+            _store.InsertEvent(DateTime.UtcNow, "block-rejected", nodeId,
+                height: block.Index, tipHash: block.Hash, reason: reason);
         }
 
         public void ObserveReorganization(string nodeId, string reason)
@@ -137,13 +109,8 @@ namespace BitcoinNetworkSimulator
             lock (_lock)
             {
                 _reorganizationsObserved++;
-                _events.Add(new WatcherEvent
-                {
-                    Type = "reorganization",
-                    NodeId = nodeId,
-                    Details = reason
-                });
             }
+            _store.InsertEvent(DateTime.UtcNow, "reorganization", nodeId, reason: reason);
         }
 
         public async Task<WatcherSnapshot> AuditAsync(bool emitTransitions = true)
@@ -241,6 +208,8 @@ namespace BitcoinNetworkSimulator
                 Explanation = explanation
             };
 
+            _store.InsertAudit(snapshot);
+
             if (snapshot.InvalidStateWhileProducingBlocks)
             {
                 Console.WriteLine($"[watcher] !!! INVALID STATE WHILE CHAIN CONTINUES BUILDING: {blocksSincePreviousAudit} block build(s) observed since last audit !!!");
@@ -260,34 +229,13 @@ namespace BitcoinNetworkSimulator
                         _ => "STATE"
                     };
                     Console.WriteLine($"\n[watcher] *** {label} *** {snapshot.Explanation}");
-                    lock (_lock)
-                    {
-                        _events.Add(new WatcherEvent
-                        {
-                            Type = $"network-{snapshot.State.ToString().ToLowerInvariant()}",
-                            Details = snapshot.Explanation
-                        });
-                    }
+                    _store.InsertEvent(DateTime.UtcNow, $"network-{snapshot.State.ToString().ToLowerInvariant()}",
+                        reason: snapshot.Explanation);
                 }
             }
 
             lock (_lock) _lastSnapshot = snapshot;
             return snapshot;
-        }
-
-        public object Report()
-        {
-            lock (_lock)
-            {
-                return new
-                {
-                    lastAudit = _lastSnapshot,
-                    blocksObserved = _blocksObserved,
-                    reorganizationsObserved = _reorganizationsObserved,
-                    rejectedBlocksObserved = _rejectedBlocksObserved,
-                    events = _events.ToList()
-                };
-            }
         }
 
         public async Task RunAsync(CancellationToken token, int intervalMs = 2000)

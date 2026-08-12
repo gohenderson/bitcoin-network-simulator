@@ -1,6 +1,6 @@
-# BitcoinNetworkSimulator
+# Bitcoin Network Simulator
 
-A toy, single-process simulation of a Bitcoin-style peer-to-peer network. Each
+A single-process simulation of a Bitcoin-style peer-to-peer network. Each
 "node" is an independent async worker with its own HTTP listener, its own view
 of the chain, and its own mempool — mining real proof-of-work against a
 public, deterministically-derived target, gossiping blocks and full chains to
@@ -168,7 +168,7 @@ Every run gets its own directory:
 ```
 ScenarioResults/<timestamp>-<scenario name, or "no-scenario">/
   <scenario file>            (copied in, if one was used)
-  watcher-report.json        (network convergence/recovery history)
+  watcher.db                 (SQLite: network convergence/recovery history — see Watching a run)
   nodes/
     <node-id>/
       blockchain.json        (that node's chain)
@@ -187,8 +187,20 @@ its historical blocks can no longer be verified.
 `ChainWatcher` polls every node's `/<node-id>/chain` every 2 seconds, independently
 validates each one, and reports whether the network has converged on a single
 valid tip (`Healthy`), is still settling (`Recovering`), or has a node in an
-invalid state (`InvalidState`). The full event log and latest audit are
-written continuously to `watcher-report.json` in the run's result folder.
+invalid state (`InvalidState`). Every observation is written directly, as it
+happens, to `watcher.db` — a SQLite database in the run's result folder
+(`WatcherStore.cs`):
+
+| Table | Contents |
+|---|---|
+| `run_info` | One row identifying the run: start time, port, scenario path/description. |
+| `events` | The append-only event log — block-built, block-accepted, block-rejected, reorganization, and network-state-transition events — with fields like `role`, `built_by`, `nonce`, and `tx_count` broken out into real columns. |
+| `audits` | One row per periodic convergence audit: state, convergence/validity flags, height range, blocks observed. |
+| `audit_nodes` | Each audited node's per-audit height/tip/validity, foreign-keyed to `audits`. |
+
+It can be queried directly (e.g. with the `sqlite3` CLI or any SQLite
+library) while a run is still in progress, and is the basis for
+reconstructing reports or charting a run's progression over time.
 
 ## Project layout
 
@@ -202,6 +214,7 @@ written continuously to `watcher-report.json` in the run's result folder.
 | `IMiner.cs` | The common interface the round-robin scheduler rotates over (`SoloMiner` or `PoolMiner`). |
 | `NodeIdentityRegistry.cs` | Process-wide table binding node Ids to the public keys they sign blocks with. |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. |
+| `WatcherStore.cs` | `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader. |
 
 `Program.cs` also contains `ProofOfWork`, `Economics`, `Ledger`, and

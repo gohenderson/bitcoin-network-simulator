@@ -686,7 +686,7 @@ namespace BitcoinNetworkSimulator
         private const int GrowthIntervalMs = 8000; // roughly double the network every 8 s — see NodeGrowthLoopAsync
         private static readonly Random Rng = new();
 
-        // Root directory for this run's node folders and watcher-report.json
+        // Root directory for this run's node folders and watcher.db
         // — ScenarioResults/<timestamp>-<scenario name, or "no-scenario">/,
         // computed once at startup by DetermineRunRootDir before anything
         // else happens, so every run's artifacts land in their own
@@ -991,7 +991,7 @@ namespace BitcoinNetworkSimulator
             var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.json");
             var scenario = await ScenarioLoader.LoadAsync(scenarioPath);
 
-            // Every run's node folders and watcher-report.json land under
+            // Every run's node folders and watcher.db land under
             // their own timestamped ScenarioResults/ subfolder from this
             // point on — see SCENARIO EXECUTION at the top of the file.
             RunRootDir = DetermineRunRootDir(scenarioPath, scenario);
@@ -1015,7 +1015,8 @@ namespace BitcoinNetworkSimulator
             Console.WriteLine("Real proof-of-work: a public, deterministically-derived target.\n");
 
             var cts = new CancellationTokenSource();
-            var watcher = new ChainWatcher(Port, new List<string>());
+            using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, scenario != null ? scenarioPath : null, scenario?.Description);
+            var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
             // One shared listener for the whole network — see
             // NetworkServer.cs — dispatching every request by the node id in
@@ -1041,13 +1042,12 @@ namespace BitcoinNetworkSimulator
                 ? NodeGrowthLoopAsync(watcher, cts.Token, effectiveMaxNodes, effectiveGrowthIntervalMs)
                 : Task.CompletedTask;
             var watcherTask = watcher.RunAsync(cts.Token);
-            var watcherPersistTask = WatcherPersistenceLoopAsync(watcher, cts.Token);
 
             Console.WriteLine($"All nodes share http://localhost:{Port}/ — address one by id in the path." +
                 (autoGrowthEnabled ? " Network grows automatically." : " Auto-growth disabled — network stays fixed."));
             Console.WriteLine($"Try: curl http://localhost:{Port}/{NodeNameFor(0)}/chain");
             Console.WriteLine($"Or:  curl http://localhost:{Port}/{NodeNameFor(0)}/balances");
-            Console.WriteLine("Watcher: inspect watcher-report.json for convergence/recovery history.");
+            Console.WriteLine("Watcher: inspect watcher.db (SQLite) for convergence/recovery history.");
 
             if (scenario?.DurationSeconds is int durationSeconds && durationSeconds > 0)
             {
@@ -1071,7 +1071,7 @@ namespace BitcoinNetworkSimulator
                 List<Task> persistSnapshot;
                 lock (NetworkLock) { persistSnapshot = new List<Task>(PersistTasks); }
                 await Task.WhenAll(
-                    new[] { miningTask, txTask, growthTask, watcherTask, watcherPersistTask }
+                    new[] { miningTask, txTask, growthTask, watcherTask }
                     .Concat(persistSnapshot));
             }
             catch (OperationCanceledException) { }
@@ -1361,32 +1361,5 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        private static async Task WatcherPersistenceLoopAsync(ChainWatcher watcher, CancellationToken token)
-        {
-            var path = Path.Combine(RunRootDir, "watcher-report.json");
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    var json = JsonSerializer.Serialize(watcher.Report(), new JsonSerializerOptions { WriteIndented = true });
-                    await File.WriteAllTextAsync(path, json, token);
-                }
-                catch (OperationCanceledException) { break; }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[watcher-persistence] failed to write {path}: {ex.Message}");
-                }
-
-                try { await Task.Delay(1000, token); }
-                catch (OperationCanceledException) { break; }
-            }
-
-            try
-            {
-                var json = JsonSerializer.Serialize(watcher.Report(), new JsonSerializerOptions { WriteIndented = true });
-                await File.WriteAllTextAsync(path, json);
-            }
-            catch { }
-        }
     }
 }
