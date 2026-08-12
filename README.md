@@ -222,13 +222,14 @@ reconstructing reports or charting a run's progression over time.
 
 | File | Responsibility |
 |---|---|
-| `Program.cs` | Entry point: network composition, round-robin mining scheduler, node growth, scenario application, persistence loops. |
+| `Program.cs` | Entry point / composition root: network composition, round-robin mining scheduler, node growth, persistence loops. |
 | `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
-| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole` and `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with). |
+| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, signing key — and its `metadata.json` load/save/apply logic). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader. |
+| `ElasticTaskPool.cs` | `ElasticTaskPool` — a bounded, load-scaling async worker pool; backs `NetworkServer`'s request handling. |
 
 ## What this is not
 

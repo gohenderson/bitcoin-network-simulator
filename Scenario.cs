@@ -9,7 +9,7 @@ namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // Declarative description of how a run should start up and how long it
-    // should last — see SCENARIO EXECUTION at the top of Program.cs. Loaded
+    // should last — see "Scenarios" in README.md. Loaded
     // once at startup (see ScenarioLoader.LoadAsync); Program is responsible
     // for turning this into actual persisted node metadata and startup
     // behavior — see Program.ApplyScenarioAsync. Deliberately a plain data

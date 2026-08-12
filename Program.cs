@@ -14,150 +14,13 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Elastic worker pool: a bounded set of async worker loops pulling from a
-    // shared queue. Starts with `minWorkers` running. If the backlog grows past
-    // `scaleUpQueueThreshold`, it spins up another worker (up to `maxWorkers`).
-    // Idle workers beyond the minimum retire themselves after a timeout, so the
-    // pool grows under load and shrinks back down at rest.
-    // ------------------------------------------------------------------
-
-    public class ElasticTaskPool
-    {
-        private readonly string _ownerId;
-        private readonly int _minWorkers;
-        private readonly int _maxWorkers;
-        private readonly int _scaleUpQueueThreshold;
-        private readonly TimeSpan _idleRetireAfter;
-
-        private readonly ConcurrentQueue<Func<Task>> _queue = new();
-        private readonly SemaphoreSlim _signal = new(0);
-        private readonly CancellationTokenSource _cts = new();
-        private readonly object _scaleLock = new();
-        private int _currentWorkers = 0;
-
-        public ElasticTaskPool(string ownerId, int minWorkers = 2, int maxWorkers = 32,
-            int scaleUpQueueThreshold = 4, TimeSpan? idleRetireAfter = null)
-        {
-            _ownerId = ownerId;
-            _minWorkers = minWorkers;
-            _maxWorkers = maxWorkers;
-            _scaleUpQueueThreshold = scaleUpQueueThreshold;
-            _idleRetireAfter = idleRetireAfter ?? TimeSpan.FromSeconds(10);
-
-            for (int i = 0; i < _minWorkers; i++)
-                SpawnWorker(isCoreWorker: true);
-        }
-
-        public void Enqueue(Func<Task> work)
-        {
-            _queue.Enqueue(work);
-            _signal.Release();
-
-            lock (_scaleLock)
-            {
-                if (_queue.Count > _scaleUpQueueThreshold && _currentWorkers < _maxWorkers)
-                    SpawnWorker(isCoreWorker: false);
-            }
-        }
-
-        private void SpawnWorker(bool isCoreWorker)
-        {
-            lock (_scaleLock)
-            {
-                if (_currentWorkers >= _maxWorkers) return;
-                _currentWorkers++;
-                Console.WriteLine($"[{_ownerId}] worker pool scaled up to {_currentWorkers} (queue depth {_queue.Count})");
-            }
-            _ = Task.Run(() => WorkerLoop(isCoreWorker));
-        }
-
-        private async Task WorkerLoop(bool isCoreWorker)
-        {
-            try
-            {
-                while (!_cts.IsCancellationRequested)
-                {
-                    bool signaled;
-                    try
-                    {
-                        signaled = await _signal.WaitAsync(_idleRetireAfter, _cts.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-
-                    if (!signaled)
-                    {
-                        if (!isCoreWorker)
-                            break;
-                        continue;
-                    }
-
-                    if (_queue.TryDequeue(out var work))
-                    {
-                        try { await work(); }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[{_ownerId}] worker error: {ex.Message}");
-                        }
-                    }
-                }
-            }
-            finally
-            {
-                lock (_scaleLock)
-                {
-                    _currentWorkers--;
-                }
-            }
-        }
-
-        public void Stop() => _cts.Cancel();
-    }
-
-    // Persisted, hand-editable per-node configuration — see "Persistence &
-    // resume" in README.md. Lives at nodes/<node-id>/metadata.json, alongside
-    // that node's blockchain.db. NodeRole is serialized as its string name
-    // (not the underlying int) specifically so it's easy to read and edit by
-    // hand — see Program's metadata JSON options.
-    public class NodeMetadata
-    {
-        public string Id { get; set; } = "";
-        public NodeRole NodeRole { get; set; } = NodeRole.Honest;
-        public int HashPower { get; set; } = 1;
-        // Whether this node ever gets a mining turn. A node with CanMine false
-        // still does everything else a full node does — serves /chain, /tx,
-        // /balances, receives and validates blocks and chains from peers, holds
-        // a mempool — it just never builds a block itself, i.e. a wallet-only /
-        // relay-only participant. See the "Mining participation" note in README.md.
-        public bool CanMine { get; set; } = true;
-        // Null/empty = mines solo (default). Otherwise, the name of a mining
-        // pool this node subscribes to — its HashPower is combined with every
-        // other current member's into the pool's single shared turn instead of
-        // getting its own. Only honored for NodeRole.Honest nodes; a malicious
-        // role's Pool value, if set, is ignored and it always mines solo. See
-        // the "Mining pools" note in README.md.
-        public string? Pool { get; set; } = null;
-        // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
-        // — see the "Signed blocks" note in README.md. Unlike every other
-        // field here, this one should never be hand-edited or deleted once a
-        // node has mined blocks: doing so orphans every historical block it
-        // signed, since the key registered for its Id on the next run would
-        // no longer be the one that actually signed that history.
-        public string? SigningKey { get; set; } = null;
-    }
-
     // ------------------------------------------------------------------
     // Program: spins up N nodes (each an async listener + a continuous mining
     // loop, both backed by their own resources), a transaction generator, and
@@ -182,8 +45,7 @@ namespace BitcoinNetworkSimulator
         // computed once at startup by DetermineRunRootDir before anything
         // else happens, so every run's artifacts land in their own
         // timestamped, reviewable folder instead of always overwriting the
-        // same nodes/ next to the executable. See SCENARIO EXECUTION at the
-        // top of the file.
+        // same nodes/ next to the executable. See "Scenarios" in README.md.
         private static string RunRootDir = AppContext.BaseDirectory;
 
         private static string SanitizeForFileName(string value)
@@ -239,8 +101,8 @@ namespace BitcoinNetworkSimulator
         // Default assignment for a brand new node with no metadata.json yet:
         // every 8th node cycles through one of each malicious type, the rest are
         // honest. Only used the first time a given node id is created — see
-        // LoadOrCreateMetadataAsync, which persists this so it (or a hand
-        // edit on top of it) sticks across restarts.
+        // NodeMetadataStore.LoadOrCreateAsync, which persists this so it (or a
+        // hand edit on top of it) sticks across restarts.
         private static NodeRole AssignRole(int index) => (index % 8) switch
         {
             4 => NodeRole.Equivocator,
@@ -254,8 +116,8 @@ namespace BitcoinNetworkSimulator
         // wallet-only (fully validates, gossips, sends/receives transactions,
         // but never gets a mining turn), so a fresh run shows a mix without any
         // manual edits. Same override rules as AssignRole — see
-        // LoadOrCreateMetadataAsync and the "Mining participation" note in
-        // README.md.
+        // NodeMetadataStore.LoadOrCreateAsync and the "Mining participation"
+        // note in README.md.
         private static bool AssignCanMine(int index) => index % 3 != 2;
 
         // Shared, lock-protected registry — nodes call the getters at broadcast time
@@ -289,185 +151,15 @@ namespace BitcoinNetworkSimulator
         // for an unknown id (404).
         private static Node? ResolveNode(string id) { lock (NetworkLock) { return NodesById.TryGetValue(id, out var node) ? node : null; } }
 
+        // "Where does this node's stuff live" and its metadata.json
+        // load/save/apply logic live in Node.cs's NodeMetadataStore, next to
+        // NodeMetadata itself — this just forwards RunRootDir so callers here
+        // don't need to know that.
         private static string NodeDirFor(string nodeId) =>
-            Path.Combine(RunRootDir, "nodes", nodeId);
+            NodeMetadataStore.NodeDirFor(RunRootDir, nodeId);
 
         private static string BlockchainDbPathFor(string nodeId) =>
             Path.Combine(NodeDirFor(nodeId), "blockchain.db");
-
-        private static string MetadataPathFor(string nodeId) =>
-            Path.Combine(NodeDirFor(nodeId), "metadata.json");
-
-        // NodeRole serialized by name ("Honest", "Corruptor", ...) rather than
-        // its underlying int, since metadata.json is meant to be hand-readable
-        // and hand-editable.
-        private static readonly JsonSerializerOptions MetadataJsonOptions = new()
-        {
-            WriteIndented = true,
-            PropertyNameCaseInsensitive = true,
-            Converters = { new JsonStringEnumConverter() }
-        };
-
-        // Base64-encoded DER <-> ECDsa conversions shared by every place that
-        // reads or writes NodeMetadata.SigningKey.
-        private static string ExportSigningKey(ECDsa key) => Convert.ToBase64String(key.ExportECPrivateKey());
-
-        private static ECDsa ImportSigningKey(string base64)
-        {
-            var key = ECDsa.Create();
-            key.ImportECPrivateKey(Convert.FromBase64String(base64), out _);
-            return key;
-        }
-
-        // Loads a node's persisted metadata.json if one already exists (from a
-        // previous run, or hand-edited by a user to bump HashPower or change
-        // NodeRole) so it survives a restart unchanged. Only a brand new node —
-        // no metadata.json yet — gets fresh defaults, written out immediately so
-        // they're there to edit or resume from next time. SigningKey is handled
-        // specially either way: a loaded metadata.json missing one (e.g. saved
-        // before this field existed) gets a freshly generated key filled in and
-        // re-saved immediately, exactly as if it were brand new — see the
-        // "Signed blocks" note in README.md for why that key, once established,
-        // must never change again.
-        private static async Task<NodeMetadata> LoadOrCreateMetadataAsync(string id, int index)
-        {
-            var path = MetadataPathFor(id);
-            if (File.Exists(path))
-            {
-                try
-                {
-                    var json = await File.ReadAllTextAsync(path);
-                    var loaded = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
-                    if (loaded != null)
-                    {
-                        Console.WriteLine($"[{id}] loaded saved metadata (role={loaded.NodeRole}, hashPower={loaded.HashPower}, canMine={loaded.CanMine}, pool={loaded.Pool ?? "(solo)"})");
-                        if (string.IsNullOrEmpty(loaded.SigningKey))
-                        {
-                            loaded.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
-                            await SaveMetadataAsync(loaded);
-                        }
-                        return loaded;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[{id}] failed to read saved metadata: {ex.Message}; assigning defaults");
-                }
-            }
-
-            var metadata = new NodeMetadata
-            {
-                Id = id,
-                NodeRole = AssignRole(index),
-                HashPower = 1,
-                CanMine = AssignCanMine(index),
-                SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256))
-            };
-            await SaveMetadataAsync(metadata);
-            return metadata;
-        }
-
-        private static async Task SaveMetadataAsync(NodeMetadata metadata)
-        {
-            var json = JsonSerializer.Serialize(metadata, MetadataJsonOptions);
-            await File.WriteAllTextAsync(MetadataPathFor(metadata.Id), json);
-        }
-
-        // Writes (or updates) nodes/<id>/metadata.json for every position
-        // `scenario`'s NodeGroups define, BEFORE any node is created or any
-        // metadata is loaded for real — this is what makes the scenario
-        // authoritative for behavior (NodeRole, HashPower, CanMine, Pool)
-        // every time it's applied, the same way hand-editing metadata.json
-        // already is. If a position already has metadata on disk (from a
-        // previous run, scenario or otherwise), its existing SigningKey is
-        // preserved rather than regenerated — see "Persistence & resume" and
-        // the "Signed blocks" note in README.md for why — so re-running the
-        // same scenario keeps building on the same node identities and chain
-        // history instead of resetting to genesis every time. Only a
-        // genuinely new position gets a freshly generated key. See "Scenarios"
-        // in README.md.
-        private static async Task ApplyScenarioAsync(Scenario scenario)
-        {
-            var index = 0;
-            foreach (var group in scenario.NodeGroups)
-            {
-                for (var i = 0; i < group.Count; i++, index++)
-                {
-                    var id = NodeNameFor(index);
-                    Directory.CreateDirectory(NodeDirFor(id));
-
-                    NodeMetadata? existing = null;
-                    var path = MetadataPathFor(id);
-                    if (File.Exists(path))
-                    {
-                        try
-                        {
-                            var json = await File.ReadAllTextAsync(path);
-                            existing = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[scenario] [{id}] failed to read existing metadata: {ex.Message}; treating as new");
-                        }
-                    }
-
-                    var metadata = existing ?? new NodeMetadata { Id = id };
-                    metadata.Id = id;
-                    metadata.NodeRole = group.Role;
-                    metadata.HashPower = group.HashPower;
-                    metadata.CanMine = group.CanMine;
-                    metadata.Pool = group.Pool;
-                    if (string.IsNullOrEmpty(metadata.SigningKey))
-                        metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
-
-                    await SaveMetadataAsync(metadata);
-                }
-            }
-
-            var durationNote = scenario.DurationSeconds is int d ? $", running for {d}s" : ", no automatic stop";
-            var growthNote = scenario.AutoGrowth ? ", auto-growth still enabled on top" : ", auto-growth disabled";
-            Console.WriteLine($"[scenario] applied {index} node(s) across {scenario.NodeGroups.Count} group(s){durationNote}{growthNote}");
-        }
-
-        // Registers every already-persisted node's public key (from a
-        // previous run) BEFORE any node starts joining or resuming its chain
-        // this run. This closes an ordering gap that would otherwise exist:
-        // nodes are (re)created one at a time as the network grows, but a
-        // resumed chain can reference BuiltBy names for nodes that haven't
-        // been (re)created yet THIS run — without this preload, validating
-        // node 0's saved chain would fail on any historical block built by
-        // node 5, since node 5's key wouldn't be registered until node 5
-        // itself joins, seconds or minutes later. Scanning every persisted
-        // nodes/<id>/metadata.json up front, independent of join order, is
-        // this simulation's stand-in for however a real network would
-        // bootstrap a shared, trusted view of "who's who" (see
-        // NodeIdentityRegistry).
-        private static async Task PreloadKnownSigningKeysAsync()
-        {
-            var nodesDir = Path.Combine(RunRootDir, "nodes");
-            if (!Directory.Exists(nodesDir)) return;
-
-            foreach (var dir in Directory.GetDirectories(nodesDir))
-            {
-                var id = Path.GetFileName(dir);
-                var path = Path.Combine(dir, "metadata.json");
-                if (!File.Exists(path)) continue;
-
-                try
-                {
-                    var json = await File.ReadAllTextAsync(path);
-                    var saved = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
-                    if (saved == null || string.IsNullOrEmpty(saved.SigningKey)) continue;
-
-                    using var ecdsa = ImportSigningKey(saved.SigningKey);
-                    NodeIdentityRegistry.Register(id, ecdsa.ExportSubjectPublicKeyInfo());
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[{id}] failed to preload saved metadata for its signing key: {ex.Message}; skipping");
-                }
-            }
-        }
 
         public static async Task Main(string[] args)
         {
@@ -497,7 +189,7 @@ namespace BitcoinNetworkSimulator
             {
                 if (!string.IsNullOrWhiteSpace(scenario.Description))
                     Console.WriteLine($"Scenario: {scenario.Description}");
-                await ApplyScenarioAsync(scenario);
+                await NodeMetadataStore.ApplyScenarioAsync(RunRootDir, scenario, NodeNameFor);
             }
             else
             {
@@ -517,7 +209,7 @@ namespace BitcoinNetworkSimulator
             var server = new NetworkServer(Port, ResolveNode);
             server.Start();
 
-            await PreloadKnownSigningKeysAsync();
+            await NodeMetadataStore.PreloadKnownSigningKeysAsync(RunRootDir);
 
             var initialNodeCount = scenario?.NodeGroups.Count > 0 ? scenario.NodeGroups.Sum(g => g.Count) : 1;
             for (var i = 0; i < initialNodeCount; i++)
@@ -583,7 +275,7 @@ namespace BitcoinNetworkSimulator
             var id = NodeNameFor(index);
 
             Directory.CreateDirectory(NodeDirFor(id));
-            var metadata = await LoadOrCreateMetadataAsync(id, index);
+            var metadata = await NodeMetadataStore.LoadOrCreateAsync(RunRootDir, id, AssignRole(index), AssignCanMine(index));
 
             lock (NetworkLock)
             {
@@ -598,7 +290,7 @@ namespace BitcoinNetworkSimulator
             // instead of holding a reference back to the Node it mines for.
             var chain = new Blockchain();
             var mempool = new ConcurrentQueue<Transaction>();
-            var signingKey = ImportSigningKey(metadata.SigningKey!);
+            var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
             var soloMiner = new SoloMiner(id, Port, metadata.NodeRole, metadata.HashPower, chain, mempool, GetAllNodeIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
@@ -642,8 +334,8 @@ namespace BitcoinNetworkSimulator
         }
 
         // A turn that finds nothing (the common case now that MineBlock is
-        // bounded by HashPower — see SIMULATED HASH POWER at the top of the
-        // file) returns almost instantly, so without a pause here this loop
+        // bounded by HashPower — see the "Mining" note in README.md)
+        // returns almost instantly, so without a pause here this loop
         // would spin a CPU core at ~100% doing essentially nothing. This delay
         // paces turns to something an operator can actually watch, and bounds
         // how often Chain.Snapshot() (an O(chain length) copy) gets taken.
@@ -735,8 +427,7 @@ namespace BitcoinNetworkSimulator
         // each keeps getting a clean, atomically-assigned index/port; only how
         // MANY join per tick has changed. maxNodes/growthIntervalMs default to
         // MaxNodes/GrowthIntervalMs but can be overridden by a scenario's
-        // MaxNodes/GrowthIntervalSeconds — see SCENARIO EXECUTION at the top
-        // of the file.
+        // MaxNodes/GrowthIntervalSeconds — see "Scenarios" in README.md.
         private static async Task NodeGrowthLoopAsync(ChainWatcher watcher, CancellationToken token, int maxNodes, int growthIntervalMs)
         {
             while (!token.IsCancellationRequested)

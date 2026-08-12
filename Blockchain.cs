@@ -83,8 +83,8 @@ namespace BitcoinNetworkSimulator
         // blocks). Lower = easier (faster blocks, good for a quick demo).
         // Chosen much lower than a "search until found" model would need,
         // because MineBlock now only gets a bounded number of attempts per
-        // turn (a node's HashPower — see SIMULATED HASH POWER at the top of
-        // the file) rather than searching indefinitely: at shift 8, a single
+        // turn (a node's HashPower — see the "Mining" note in README.md)
+        // rather than searching indefinitely: at shift 8, a single
         // attempt succeeds with probability 1/256, so a regular (HashPower 1)
         // node still has a real, if modest, chance each turn, while a node
         // with HashPower 1000 succeeds on the vast majority of its turns —
@@ -334,8 +334,8 @@ namespace BitcoinNetworkSimulator
         //     spend of the same coins finds the balance already gone
         //   - a node lying about who built it: BuiltBy must have a registered
         //     signing key (see NodeIdentityRegistry) and the block's Signature
-        //     must actually verify against that key — see BUILTBY SIGNING at
-        //     the top of the file
+        //     must actually verify against that key — see the "Signed
+        //     blocks" note in README.md
         // Unlike the earlier coordinator-picked versions, being selected to build
         // now genuinely costs something real: computational search work.
         private static (bool Ok, string Reason) ValidateChain(List<Block> candidate)

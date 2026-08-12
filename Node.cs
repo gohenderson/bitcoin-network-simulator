@@ -6,6 +6,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
@@ -206,8 +207,8 @@ namespace BitcoinNetworkSimulator
 
     // ------------------------------------------------------------------
     // A process-wide, append-only registry binding each node's Id to the
-    // public key it signs blocks with — see BUILTBY SIGNING at the top of
-    // the file. This binding is what makes a block's BuiltBy claim
+    // public key it signs blocks with — see the "Signed blocks" note in
+    // README.md. This binding is what makes a block's BuiltBy claim
     // verifiable: not the mere existence of a signature (anyone can generate
     // a keypair and sign something), but that the signature verifies against
     // THIS registry's independently-established record of which key belongs
@@ -273,6 +274,232 @@ namespace BitcoinNetworkSimulator
             catch (CryptographicException)
             {
                 return false;
+            }
+        }
+    }
+
+    // Persisted, hand-editable per-node configuration — see "Persistence &
+    // resume" in README.md. Lives at nodes/<node-id>/metadata.json, alongside
+    // that node's blockchain.db. NodeRole is serialized as its string name
+    // (not the underlying int) specifically so it's easy to read and edit by
+    // hand — see NodeMetadataStore's metadata JSON options.
+    public class NodeMetadata
+    {
+        public string Id { get; set; } = "";
+        public NodeRole NodeRole { get; set; } = NodeRole.Honest;
+        public int HashPower { get; set; } = 1;
+        // Whether this node ever gets a mining turn. A node with CanMine false
+        // still does everything else a full node does — serves /chain, /tx,
+        // /balances, receives and validates blocks and chains from peers, holds
+        // a mempool — it just never builds a block itself, i.e. a wallet-only /
+        // relay-only participant. See the "Mining participation" note in README.md.
+        public bool CanMine { get; set; } = true;
+        // Null/empty = mines solo (default). Otherwise, the name of a mining
+        // pool this node subscribes to — its HashPower is combined with every
+        // other current member's into the pool's single shared turn instead of
+        // getting its own. Only honored for NodeRole.Honest nodes; a malicious
+        // role's Pool value, if set, is ignored and it always mines solo. See
+        // the "Mining pools" note in README.md.
+        public string? Pool { get; set; } = null;
+        // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
+        // — see the "Signed blocks" note in README.md. Unlike every other
+        // field here, this one should never be hand-edited or deleted once a
+        // node has mined blocks: doing so orphans every historical block it
+        // signed, since the key registered for its Id on the next run would
+        // no longer be the one that actually signed that history.
+        public string? SigningKey { get; set; } = null;
+    }
+
+    // ------------------------------------------------------------------
+    // Loads, saves, and applies NodeMetadata to/from nodes/<node-id>/metadata.json
+    // under a run's root directory (see Program.RunRootDir — passed in rather
+    // than read directly, so this store doesn't depend on Program's state).
+    // Also owns NodeDirFor: "where does this node's stuff live on disk" starts
+    // with its metadata, and Program.cs's own BlockchainDbPathFor builds on
+    // this same helper so both files agree on one node directory layout.
+    // ------------------------------------------------------------------
+    public static class NodeMetadataStore
+    {
+        public static string NodeDirFor(string runRootDir, string nodeId) =>
+            Path.Combine(runRootDir, "nodes", nodeId);
+
+        private static string MetadataPathFor(string runRootDir, string nodeId) =>
+            Path.Combine(NodeDirFor(runRootDir, nodeId), "metadata.json");
+
+        // NodeRole serialized by name ("Honest", "Corruptor", ...) rather than
+        // its underlying int, since metadata.json is meant to be hand-readable
+        // and hand-editable.
+        private static readonly JsonSerializerOptions MetadataJsonOptions = new()
+        {
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true,
+            Converters = { new JsonStringEnumConverter() }
+        };
+
+        // Base64-encoded DER <-> ECDsa conversions shared by every place that
+        // reads or writes NodeMetadata.SigningKey.
+        public static string ExportSigningKey(ECDsa key) => Convert.ToBase64String(key.ExportECPrivateKey());
+
+        public static ECDsa ImportSigningKey(string base64)
+        {
+            var key = ECDsa.Create();
+            key.ImportECPrivateKey(Convert.FromBase64String(base64), out _);
+            return key;
+        }
+
+        // Loads a node's persisted metadata.json if one already exists (from a
+        // previous run, or hand-edited by a user to bump HashPower or change
+        // NodeRole) so it survives a restart unchanged. Only a brand new node —
+        // no metadata.json yet — gets fresh defaults, written out immediately so
+        // they're there to edit or resume from next time. `defaultRole` and
+        // `defaultCanMine` are the caller's (Program.AssignRole/AssignCanMine)
+        // default-assignment policy for a brand new node — this store only
+        // decides whether an existing file's contents win over those defaults,
+        // never what the defaults themselves should be. SigningKey is handled
+        // specially either way: a loaded metadata.json missing one (e.g. saved
+        // before this field existed) gets a freshly generated key filled in and
+        // re-saved immediately, exactly as if it were brand new — see the
+        // "Signed blocks" note in README.md for why that key, once established,
+        // must never change again.
+        public static async Task<NodeMetadata> LoadOrCreateAsync(string runRootDir, string id, NodeRole defaultRole, bool defaultCanMine)
+        {
+            var path = MetadataPathFor(runRootDir, id);
+            if (File.Exists(path))
+            {
+                try
+                {
+                    var json = await File.ReadAllTextAsync(path);
+                    var loaded = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
+                    if (loaded != null)
+                    {
+                        Console.WriteLine($"[{id}] loaded saved metadata (role={loaded.NodeRole}, hashPower={loaded.HashPower}, canMine={loaded.CanMine}, pool={loaded.Pool ?? "(solo)"})");
+                        if (string.IsNullOrEmpty(loaded.SigningKey))
+                        {
+                            loaded.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+                            await SaveAsync(runRootDir, loaded);
+                        }
+                        return loaded;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{id}] failed to read saved metadata: {ex.Message}; assigning defaults");
+                }
+            }
+
+            var metadata = new NodeMetadata
+            {
+                Id = id,
+                NodeRole = defaultRole,
+                HashPower = 1,
+                CanMine = defaultCanMine,
+                SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256))
+            };
+            await SaveAsync(runRootDir, metadata);
+            return metadata;
+        }
+
+        public static async Task SaveAsync(string runRootDir, NodeMetadata metadata)
+        {
+            var json = JsonSerializer.Serialize(metadata, MetadataJsonOptions);
+            await File.WriteAllTextAsync(MetadataPathFor(runRootDir, metadata.Id), json);
+        }
+
+        // Writes (or updates) nodes/<id>/metadata.json for every position
+        // `scenario`'s NodeGroups define, BEFORE any node is created or any
+        // metadata is loaded for real — this is what makes the scenario
+        // authoritative for behavior (NodeRole, HashPower, CanMine, Pool)
+        // every time it's applied, the same way hand-editing metadata.json
+        // already is. If a position already has metadata on disk (from a
+        // previous run, scenario or otherwise), its existing SigningKey is
+        // preserved rather than regenerated — see "Persistence & resume" and
+        // the "Signed blocks" note in README.md for why — so re-running the
+        // same scenario keeps building on the same node identities and chain
+        // history instead of resetting to genesis every time. Only a
+        // genuinely new position gets a freshly generated key. See "Scenarios"
+        // in README.md. `nodeNameFor` is Program's own index -> node-id naming
+        // policy (Greek alphabet names) — this store just needs an id for each
+        // position, not a say in how one gets picked.
+        public static async Task ApplyScenarioAsync(string runRootDir, Scenario scenario, Func<int, string> nodeNameFor)
+        {
+            var index = 0;
+            foreach (var group in scenario.NodeGroups)
+            {
+                for (var i = 0; i < group.Count; i++, index++)
+                {
+                    var id = nodeNameFor(index);
+                    Directory.CreateDirectory(NodeDirFor(runRootDir, id));
+
+                    NodeMetadata? existing = null;
+                    var path = MetadataPathFor(runRootDir, id);
+                    if (File.Exists(path))
+                    {
+                        try
+                        {
+                            var json = await File.ReadAllTextAsync(path);
+                            existing = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[scenario] [{id}] failed to read existing metadata: {ex.Message}; treating as new");
+                        }
+                    }
+
+                    var metadata = existing ?? new NodeMetadata { Id = id };
+                    metadata.Id = id;
+                    metadata.NodeRole = group.Role;
+                    metadata.HashPower = group.HashPower;
+                    metadata.CanMine = group.CanMine;
+                    metadata.Pool = group.Pool;
+                    if (string.IsNullOrEmpty(metadata.SigningKey))
+                        metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+
+                    await SaveAsync(runRootDir, metadata);
+                }
+            }
+
+            var durationNote = scenario.DurationSeconds is int d ? $", running for {d}s" : ", no automatic stop";
+            var growthNote = scenario.AutoGrowth ? ", auto-growth still enabled on top" : ", auto-growth disabled";
+            Console.WriteLine($"[scenario] applied {index} node(s) across {scenario.NodeGroups.Count} group(s){durationNote}{growthNote}");
+        }
+
+        // Registers every already-persisted node's public key (from a
+        // previous run) BEFORE any node starts joining or resuming its chain
+        // this run. This closes an ordering gap that would otherwise exist:
+        // nodes are (re)created one at a time as the network grows, but a
+        // resumed chain can reference BuiltBy names for nodes that haven't
+        // been (re)created yet THIS run — without this preload, validating
+        // node 0's saved chain would fail on any historical block built by
+        // node 5, since node 5's key wouldn't be registered until node 5
+        // itself joins, seconds or minutes later. Scanning every persisted
+        // nodes/<id>/metadata.json up front, independent of join order, is
+        // this simulation's stand-in for however a real network would
+        // bootstrap a shared, trusted view of "who's who" (see
+        // NodeIdentityRegistry).
+        public static async Task PreloadKnownSigningKeysAsync(string runRootDir)
+        {
+            var nodesDir = Path.Combine(runRootDir, "nodes");
+            if (!Directory.Exists(nodesDir)) return;
+
+            foreach (var dir in Directory.GetDirectories(nodesDir))
+            {
+                var id = Path.GetFileName(dir);
+                var path = Path.Combine(dir, "metadata.json");
+                if (!File.Exists(path)) continue;
+
+                try
+                {
+                    var json = await File.ReadAllTextAsync(path);
+                    var saved = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
+                    if (saved == null || string.IsNullOrEmpty(saved.SigningKey)) continue;
+
+                    using var ecdsa = ImportSigningKey(saved.SigningKey);
+                    NodeIdentityRegistry.Register(id, ecdsa.ExportSubjectPublicKeyInfo());
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{id}] failed to preload saved metadata for its signing key: {ex.Message}; skipping");
+                }
             }
         }
     }
