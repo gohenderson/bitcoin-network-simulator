@@ -637,7 +637,7 @@ namespace BitcoinNetworkSimulator
 
     // Persisted, hand-editable per-node configuration — see PERSISTENCE & RESUME
     // at the top of the file. Lives at nodes/<node-id>/metadata.json, alongside
-    // that node's blockchain.json. NodeRole is serialized as its string name
+    // that node's blockchain.db. NodeRole is serialized as its string name
     // (not the underlying int) specifically so it's easy to read and edit by
     // hand — see Program's metadata JSON options.
     public class NodeMetadata
@@ -774,6 +774,7 @@ namespace BitcoinNetworkSimulator
         private static readonly List<Node> AllNodes = new();
         private static readonly Dictionary<string, Node> NodesById = new();
         private static readonly List<Task> PersistTasks = new();
+        private static readonly List<BlockchainStore> BlockchainStores = new();
 
         // Every currently-mining participant — one SoloMiner per non-pooled
         // CanMine node, one PoolMiner per distinct pool name — is what the
@@ -800,8 +801,8 @@ namespace BitcoinNetworkSimulator
         private static string NodeDirFor(string nodeId) =>
             Path.Combine(RunRootDir, "nodes", nodeId);
 
-        private static string PersistPathFor(string nodeId) =>
-            Path.Combine(NodeDirFor(nodeId), "blockchain.json");
+        private static string BlockchainDbPathFor(string nodeId) =>
+            Path.Combine(NodeDirFor(nodeId), "blockchain.db");
 
         private static string MetadataPathFor(string nodeId) =>
             Path.Combine(NodeDirFor(nodeId), "metadata.json");
@@ -1075,6 +1076,11 @@ namespace BitcoinNetworkSimulator
                     .Concat(persistSnapshot));
             }
             catch (OperationCanceledException) { }
+
+            List<BlockchainStore> storesSnapshot;
+            lock (NetworkLock) { storesSnapshot = new List<BlockchainStore>(BlockchainStores); }
+            foreach (var store in storesSnapshot) store.Dispose();
+
             Console.WriteLine("Stopped.");
         }
 
@@ -1104,13 +1110,15 @@ namespace BitcoinNetworkSimulator
             var signingKey = ImportSigningKey(metadata.SigningKey!);
             var soloMiner = new SoloMiner(id, Port, metadata.NodeRole, metadata.HashPower, chain, mempool, GetAllNodeIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher);
-            await ResumeNodeFromDiskAsync(node);
+            var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
+            ResumeNodeFromDisk(node, blockchainStore);
 
             lock (NetworkLock)
             {
                 AllNodes.Add(node);
                 NodesById[id] = node;
-                PersistTasks.Add(PersistenceLoopAsync(node, token));
+                BlockchainStores.Add(blockchainStore);
+                PersistTasks.Add(PersistenceLoopAsync(node, blockchainStore, token));
 
                 // Deciding solo vs. pooled — and, for pools, finding or
                 // creating that pool's PoolMiner — happens exactly once, right
@@ -1255,25 +1263,14 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        private static async Task ResumeNodeFromDiskAsync(Node node)
+        private static void ResumeNodeFromDisk(Node node, BlockchainStore store)
         {
-            var persistPath = PersistPathFor(node.Id);
-
-            if (!File.Exists(persistPath))
-            {
-                Console.WriteLine($"[{node.Id}] no saved chain found ({Path.GetFileName(persistPath)}); starting from genesis");
-                return;
-            }
-
             try
             {
-                var json = await File.ReadAllTextAsync(persistPath);
-                var candidate = JsonSerializer.Deserialize<List<Block>>(json,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
+                var candidate = store.LoadAll();
                 if (candidate == null || candidate.Count == 0)
                 {
-                    Console.WriteLine($"[{node.Id}] saved chain file was empty or unreadable; starting from genesis");
+                    Console.WriteLine($"[{node.Id}] no saved chain found (blockchain.db); starting from genesis");
                     return;
                 }
 
@@ -1339,22 +1336,19 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        private static async Task PersistenceLoopAsync(Node node, CancellationToken token)
+        private static async Task PersistenceLoopAsync(Node node, BlockchainStore store, CancellationToken token)
         {
-            var persistPath = PersistPathFor(node.Id);
-
             while (!token.IsCancellationRequested)
             {
                 try
                 {
                     var snapshot = node.Chain.Snapshot();
-                    var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
-                    await File.WriteAllTextAsync(persistPath, json, token);
+                    store.Sync(snapshot);
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[persistence:{node.Id}] failed to write {persistPath}: {ex.Message}");
+                    Console.WriteLine($"[persistence:{node.Id}] failed to sync blockchain.db: {ex.Message}");
                 }
 
                 if (!await DelayOrCancelled(3000, token)) break;

@@ -171,16 +171,32 @@ ScenarioResults/<timestamp>-<scenario name, or "no-scenario">/
   watcher.db                 (SQLite: network convergence/recovery history — see Watching a run)
   nodes/
     <node-id>/
-      blockchain.json        (that node's chain)
+      blockchain.db           (SQLite: that node's chain — see below)
       metadata.json           (that node's role, hash power, mining/pool config, signing key)
 ```
 
-On startup, a node resumes from its saved `blockchain.json` if it's
+On startup, a node resumes from its saved `blockchain.db` if it's
 structurally valid and shares this build's genesis; otherwise it starts fresh.
 `metadata.json` is loaded if present (so a hand-edited `HashPower`, `NodeRole`,
 `CanMine`, or `Pool` value survives a restart) and is safe to hand-edit —
 except `SigningKey`, which must never change once a node has mined blocks, or
 its historical blocks can no longer be verified.
+
+Each node's `blockchain.db` (`BlockchainStore.cs`) holds its local chain
+across two tables:
+
+| Table | Contents |
+|---|---|
+| `blocks` | One row per block, keyed by height (`idx`): timestamp, previous/own hash, builder, signature, target, nonce. |
+| `transactions` | One row per transaction, foreign-keyed to `blocks`, with a `position` column preserving in-block order. |
+
+`PersistenceLoopAsync` syncs each node's in-memory chain to its database
+every 3 seconds. It only ever writes the records that actually need to
+change: in the common case (blocks only ever appended) that's just the new
+tail; on a reorg, it finds the height where the in-memory chain first
+diverges from what's on disk, trims the persisted records from there
+onward, and reinserts the replacement blocks — everything below the
+divergence point is untouched, since a block never changes once mined.
 
 ## Watching a run
 
@@ -213,6 +229,7 @@ reconstructing reports or charting a run's progression over time.
 | `PoolMiner.cs` | A named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting. |
 | `IMiner.cs` | The common interface the round-robin scheduler rotates over (`SoloMiner` or `PoolMiner`). |
 | `NodeIdentityRegistry.cs` | Process-wide table binding node Ids to the public keys they sign blocks with. |
+| `BlockchainStore.cs` | `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. |
 | `WatcherStore.cs` | `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader. |
