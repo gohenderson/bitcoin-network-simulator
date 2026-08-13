@@ -11,7 +11,7 @@ namespace BitcoinNetworkSimulator
     // destination node is the first path segment (e.g.
     // http://localhost:5000/000-alpha/chain addresses node "000-alpha"'s
     // /chain endpoint); NetworkServer resolves that segment to a live Node
-    // via `resolveNode` (backed by Program.NodesById) and hands the
+    // via `resolveNode` (backed by NodeNetwork's registry) and hands the
     // remaining route to that node's own HandleRequestAsync (see Node.cs) —
     // so Node still owns everything about what a request DOES, just not how
     // it physically arrives. Incoming requests are handed to an

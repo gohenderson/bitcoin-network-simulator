@@ -190,7 +190,7 @@ local chain across two tables:
 | `blocks` | One row per block, keyed by height (`idx`): timestamp, previous/own hash, builder, signature, target, nonce. |
 | `transactions` | One row per transaction, foreign-keyed to `blocks`, with a `position` column preserving in-block order. |
 
-`PersistenceLoopAsync` syncs each node's in-memory chain to its database
+`PersistenceLoop.RunAsync` syncs each node's in-memory chain to its database
 every 3 seconds. It only ever writes the records that actually need to
 change: in the common case (blocks only ever appended) that's just the new
 tail; on a reorg, it finds the height where the in-memory chain first
@@ -222,13 +222,17 @@ reconstructing reports or charting a run's progression over time.
 
 | File | Responsibility |
 |---|---|
-| `Program.cs` | Entry point / composition root: network composition, round-robin mining scheduler, node growth, persistence loops. |
+| `Program.cs` | Entry point / composition root: reads the scenario, builds a `NodeNetwork`, and starts the mining scheduler, transaction generator, growth loop, watcher, and persistence loops as async tasks. |
+| `NodeNetwork.cs` | The live network: the node/miner registry, node naming and default role/mining-participation policy, node creation (`AddNodeAsync`), and organic growth (`GrowthLoopAsync`). |
+| `MiningScheduler.cs` | Round-robin turn scheduling across whatever `IMiner`s currently exist — solo or pooled, reshuffled whenever a new block appears. |
+| `TransactionGenerator.cs` | Synthetic transaction traffic: picks a real sender/recipient pair from live balances each round and submits a transaction. |
+| `PersistenceLoop.cs` | Per-node persistence: resumes a node's chain from its `blockchain.db` at startup, then periodically syncs it back for the rest of the run. |
 | `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
 | `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, signing key — and its `metadata.json` load/save/apply logic). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
-| `Scenario.cs` | Scenario file format and loader. |
+| `Scenario.cs` | Scenario file format and loader; also computes each run's `ScenarioResults/` result directory. |
 | `ElasticTaskPool.cs` | `ElasticTaskPool` — a bounded, load-scaling async worker pool; backs `NetworkServer`'s request handling. |
 
 ## What this is not

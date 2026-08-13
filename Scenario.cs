@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
@@ -12,9 +13,9 @@ namespace BitcoinNetworkSimulator
     // should last — see "Scenarios" in README.md. Loaded
     // once at startup (see ScenarioLoader.LoadAsync); Program is responsible
     // for turning this into actual persisted node metadata and startup
-    // behavior — see Program.ApplyScenarioAsync. Deliberately a plain data
-    // model with no dependency on Program's internals, so this file can be
-    // read in isolation to understand the whole format.
+    // behavior — see NodeMetadataStore.ApplyScenarioAsync. Deliberately a
+    // plain data model with no dependency on Program's internals, so this
+    // file can be read in isolation to understand the whole format.
     // ------------------------------------------------------------------
     public class Scenario
     {
@@ -30,7 +31,7 @@ namespace BitcoinNetworkSimulator
         public int? DurationSeconds { get; set; }
 
         // Whether the network keeps growing organically (see
-        // Program.NodeGrowthLoopAsync) on top of the nodes NodeGroups create
+        // NodeNetwork.GrowthLoopAsync) on top of the nodes NodeGroups create
         // up front. Defaults to true, matching behavior with no scenario at
         // all; set false to freeze the network at exactly the node count
         // NodeGroups add up to, for this run's whole duration.
@@ -58,7 +59,7 @@ namespace BitcoinNetworkSimulator
     // existing identity at a given position is preserved rather than
     // overwritten, so re-running the same scenario keeps building on the
     // same node identities and chain history instead of resetting to
-    // genesis every time — see Program.ApplyScenarioAsync).
+    // genesis every time — see NodeMetadataStore.ApplyScenarioAsync).
     public class ScenarioNodeGroup
     {
         public int Count { get; set; } = 1;
@@ -101,6 +102,47 @@ namespace BitcoinNetworkSimulator
                 Console.WriteLine($"[scenario] failed to read {path}: {ex.Message}; ignoring, starting normally");
                 return null;
             }
+        }
+
+        private static string SanitizeForFileName(string value)
+        {
+            var invalid = Path.GetInvalidFileNameChars();
+            return new string(value.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        }
+
+        // Root directory for this run's node folders and watcher.db —
+        // ScenarioResults/<timestamp>-<scenario name, or "no-scenario">/,
+        // computed once at startup before anything else happens, so every
+        // run's artifacts land in their own timestamped, reviewable folder
+        // instead of always overwriting the same nodes/ next to the
+        // executable. Also copies the exact scenario file that was executed
+        // into the new result folder (unmodified, same filename) when one
+        // was used, so the folder is a self-contained record of both what
+        // happened and exactly what configuration produced it — no need to
+        // go find Scenarios/whatever.json separately, which may have since
+        // been edited or deleted. See "Scenarios" in README.md.
+        public static string DetermineRunRootDir(string scenarioPath, Scenario? scenario)
+        {
+            var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmssfff");
+            var label = scenario != null
+                ? SanitizeForFileName(Path.GetFileNameWithoutExtension(scenarioPath))
+                : "no-scenario";
+            var dir = Path.Combine(AppContext.BaseDirectory, "ScenarioResults", $"{timestamp}-{label}");
+            Directory.CreateDirectory(dir);
+
+            if (scenario != null)
+            {
+                try
+                {
+                    File.Copy(scenarioPath, Path.Combine(dir, Path.GetFileName(scenarioPath)), overwrite: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[scenario] failed to copy {scenarioPath} into {dir}: {ex.Message}");
+                }
+            }
+
+            return dir;
         }
     }
 }

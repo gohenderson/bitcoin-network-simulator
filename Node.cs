@@ -36,7 +36,7 @@ namespace BitcoinNetworkSimulator
     // owns everything about what a request DOES (validating and accepting
     // what peers send it) — just not how it physically arrives anymore.
     // Mining lives entirely outside Node, in SoloMiner/PoolMiner/IMiner (see
-    // Miner.cs) — Program.AddNodeAsync (the
+    // Miner.cs) — NodeNetwork.AddNodeAsync (the
     // composition root) constructs a Node's Chain and Mempool once and
     // shares those same instances with that node's SoloMiner, but Node
     // itself holds no reference to it and knows nothing about mining,
@@ -315,8 +315,8 @@ namespace BitcoinNetworkSimulator
     // under a run's root directory (see Program.RunRootDir — passed in rather
     // than read directly, so this store doesn't depend on Program's state).
     // Also owns NodeDirFor: "where does this node's stuff live on disk" starts
-    // with its metadata, and Program.cs's own BlockchainDbPathFor builds on
-    // this same helper so both files agree on one node directory layout.
+    // with its metadata, and NodeNetwork.cs's own BlockchainDbPathFor builds
+    // on this same helper so both files agree on one node directory layout.
     // ------------------------------------------------------------------
     public static class NodeMetadataStore
     {
@@ -352,7 +352,7 @@ namespace BitcoinNetworkSimulator
         // NodeRole) so it survives a restart unchanged. Only a brand new node —
         // no metadata.json yet — gets fresh defaults, written out immediately so
         // they're there to edit or resume from next time. `defaultRole` and
-        // `defaultCanMine` are the caller's (Program.AssignRole/AssignCanMine)
+        // `defaultCanMine` are the caller's (NodeNetwork.AssignRole/AssignCanMine)
         // default-assignment policy for a brand new node — this store only
         // decides whether an existing file's contents win over those defaults,
         // never what the defaults themselves should be. SigningKey is handled

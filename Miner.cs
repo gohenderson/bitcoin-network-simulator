@@ -18,7 +18,7 @@ namespace BitcoinNetworkSimulator
     // to peers. A SoloMiner doesn't hold a reference to the Node it mines
     // for — it's handed its own copies of exactly what it needs (identity,
     // chain, mempool, network callbacks) at construction time. That's what
-    // lets Program.AddNodeAsync build a SoloMiner independently of Node
+    // lets NodeNetwork.AddNodeAsync build a SoloMiner independently of Node
     // rather than the two being circularly dependent on each other. The
     // Chain and Mempool instances are shared with the owning Node — both are
     // constructed once by that same composition root and passed to Node and
@@ -34,7 +34,7 @@ namespace BitcoinNetworkSimulator
     //
     // A SoloMiner also owns this node's signing identity: `signingKey` is
     // handed in already loaded from NodeMetadata.SigningKey (or freshly
-    // generated for a brand new node — see Program.LoadOrCreateMetadataAsync),
+    // generated for a brand new node — see NodeMetadataStore.LoadOrCreateAsync),
     // so the same identity persists across restarts. Its public half is
     // registered under this node's Id in NodeIdentityRegistry — the
     // constructor is the very first thing this identity does, before it
@@ -485,12 +485,12 @@ namespace BitcoinNetworkSimulator
     // turn — see the "Mining pools" note in README.md. This is where all
     // pool-specific logic lives — combining member HashPower, picking who
     // coordinates a given turn, splitting the reward — so the round-robin
-    // scheduler (Program.RoundRobinMiningLoopAsync) never has to know a pool
+    // scheduler (MiningScheduler.RunAsync) never has to know a pool
     // is anything other than one more IMiner.
     //
     // Membership starts with whatever's passed to the constructor and can
     // grow afterward via AddMember as new nodes join this pool over the
-    // network's lifetime (see Program.AddNodeAsync) — the pool itself is the
+    // network's lifetime (see NodeNetwork.AddNodeAsync) — the pool itself is the
     // one place that needs to track that, precisely so nothing else has to.
     // Reads and writes to the member list are locked because AddMember (from
     // the node-growth loop) and MineOneRoundAsync (from the mining loop) run
@@ -549,18 +549,18 @@ namespace BitcoinNetworkSimulator
     // Common mining entry point implemented by both SoloMiner (an individual
     // node mining on its own, above) and PoolMiner (a named group of
     // SoloMiners mining as one combined entity, above). The
-    // round-robin scheduler (Program.RoundRobinMiningLoopAsync) works purely
+    // round-robin scheduler (MiningScheduler.RunAsync) works purely
     // in terms of IMiner and deliberately knows nothing about pools, roles,
     // or hash power: it just orders whatever IMiners currently exist and
     // gives each one a turn. All of that — whether a node mines solo or as
     // part of a pool, how a pool picks who coordinates its turn, how a pool
     // splits its reward — is decided when a miner is created (see
-    // Program.AddNodeAsync) and, for pools, inside PoolMiner itself.
+    // NodeNetwork.AddNodeAsync) and, for pools, inside PoolMiner itself.
     // ------------------------------------------------------------------
     public interface IMiner
     {
         // Stable identity used to key this miner's spot in the scheduler's
-        // per-block random turn order (Program.MiningOrderKeys) — a node's Id
+        // per-block random turn order (MiningScheduler.OrderKeys) — a node's Id
         // for a SoloMiner, a pool's name for a PoolMiner.
         string Label { get; }
 
