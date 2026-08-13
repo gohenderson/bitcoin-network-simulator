@@ -13,10 +13,10 @@ namespace BitcoinNetworkSimulator
     // /chain endpoint); NetworkServer resolves that segment to a live Node
     // via `resolveNode` (backed by NodeNetwork's registry) and hands the
     // remaining route to that node's own HandleRequestAsync (see Node.cs) —
-    // so Node still owns everything about what a request DOES, just not how
-    // it physically arrives. Incoming requests are handed to an
-    // ElasticTaskPool rather than getting an unbounded Task.Run each, same
-    // as every per-node listener used to do individually.
+    // so Node owns everything about what a request DOES, not how it
+    // physically arrives. Incoming requests are handed to a bounded
+    // ElasticTaskPool rather than an unbounded Task.Run each, so the number
+    // of concurrent request handlers stays capped under load.
     // ------------------------------------------------------------------
 
     public class NetworkServer

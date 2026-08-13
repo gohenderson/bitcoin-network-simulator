@@ -252,17 +252,14 @@ namespace BitcoinNetworkSimulator
     }
 
     // ------------------------------------------------------------------
-    // SQLite-backed persistence for ChainWatcher — replaces the old
-    // watcher-report.json dump. One watcher.db lives in each run's result
-    // folder (see RunRootDir in Program.cs), containing:
+    // SQLite-backed persistence for ChainWatcher. One watcher.db lives in
+    // each run's result folder (see RunRootDir in Program.cs), containing:
     //
     //   run_info    - one row identifying this run (started_at, port, scenario)
     //   events      - the append-only event log (block-built/accepted/rejected,
-    //                 reorganizations, network state transitions), with the
-    //                 fields that used to be packed into a formatted Details
-    //                 string broken out into real columns so they're directly
-    //                 queryable (e.g. nonce, role, tx_count) instead of needing
-    //                 to be re-parsed out of text.
+    //                 reorganizations, network state transitions), with fields
+    //                 like nonce, role, and tx_count broken out into real,
+    //                 directly queryable columns.
     //   audits      - one row per periodic convergence audit (ChainWatcher.AuditAsync)
     //   audit_nodes - each audited node's per-audit height/tip/validity, FK'd to audits
     //

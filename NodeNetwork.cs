@@ -180,9 +180,8 @@ namespace BitcoinNetworkSimulator
         // join as already exist — a network effect where the bigger it already
         // is, the faster it grows, rather than a fixed trickle of one at a
         // time — capped so the total never exceeds maxNodes. New nodes are
-        // still added one at a time (sequential awaits, same as before) so
-        // each keeps getting a clean, atomically-assigned index/port; only how
-        // MANY join per tick has changed. maxNodes/growthIntervalMs default to
+        // added one at a time (sequential awaits) so each gets a clean,
+        // atomically-assigned index/port. maxNodes/growthIntervalMs default to
         // DefaultMaxNodes/DefaultGrowthIntervalMs but can be overridden by a
         // scenario's MaxNodes/GrowthIntervalSeconds — see "Scenarios" in
         // README.md.

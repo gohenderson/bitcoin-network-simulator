@@ -156,7 +156,7 @@ assumption, to demonstrate that the network catches it:
 
 | Role | Behavior | Caught by |
 |---|---|---|
-| `Equivocator` | Mines two separate valid blocks at the same height to fork the chain. | Real proof-of-work makes this genuinely costly — no longer a free action. |
+| `Equivocator` | Mines two separate valid blocks at the same height to fork the chain. | Real proof-of-work makes this genuinely costly — a deliberate fork, not a free action. |
 | `Impersonator` | Claims another node's identity (`BuiltBy`) to redirect a reward. | Can only sign with its own key, which never verifies against the name it's framing. |
 | `Corruptor` | Tampers with a block after finding a valid nonce. | The recomputed hash no longer matches the block's contents, and a tampered hash essentially never still satisfies the target. |
 | `Withholder` | Only tells some peers about a new block. | Peers catch up via the next round's full-chain gossip. |

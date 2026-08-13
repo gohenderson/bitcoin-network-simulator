@@ -62,8 +62,7 @@ namespace BitcoinNetworkSimulator
 
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
-        // builds is http://localhost:{serverPort}/{peerId}/... — not a
-        // per-node port anymore.
+        // builds is http://localhost:{serverPort}/{peerId}/....
         public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getAllNodeIds, ChainWatcher watcher, ECDsa signingKey)
         {
@@ -243,7 +242,7 @@ namespace BitcoinNetworkSimulator
             {
                 // Tamper AFTER a valid nonce was already found. If Transactions[0] is
                 // the coinbase entry (the common case), this inflates the claimed
-                // reward — which now gets caught THREE ways: the hash no longer
+                // reward — which gets caught THREE ways: the hash no longer
                 // matches the block's contents, a freshly different hash essentially
                 // never still satisfies a hard target by chance, AND independently,
                 // every peer recomputes what the coinbase amount SHOULD be and will
@@ -354,10 +353,10 @@ namespace BitcoinNetworkSimulator
         }
 
         // Equivocator: has to mine TWO separate valid blocks on the same parent to
-        // fork the network — real, doubled computational cost, unlike the earlier
-        // free-forking versions. Both blocks claim the same (correct) reward, since
-        // only whichever one actually survives on the eventual winning chain will
-        // ever count — the other is simply never adopted anywhere.
+        // fork the network — real, doubled computational cost. Both blocks claim
+        // the same (correct) reward, since only whichever one actually survives on
+        // the eventual winning chain will ever count — the other is simply never
+        // adopted anywhere.
         private async Task MineAndBroadcastEquivocationAsync(CancellationToken token)
         {
             var parent = _chain.Latest;

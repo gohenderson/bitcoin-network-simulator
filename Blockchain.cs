@@ -81,15 +81,14 @@ namespace BitcoinNetworkSimulator
 
         // Higher = harder (lower per-attempt success probability, slower
         // blocks). Lower = easier (faster blocks, good for a quick demo).
-        // Chosen much lower than a "search until found" model would need,
-        // because MineBlock now only gets a bounded number of attempts per
-        // turn (a node's HashPower — see the "Mining" note in README.md)
-        // rather than searching indefinitely: at shift 8, a single
-        // attempt succeeds with probability 1/256, so a regular (HashPower 1)
-        // node still has a real, if modest, chance each turn, while a node
-        // with HashPower 1000 succeeds on the vast majority of its turns —
-        // exactly the "1000x more likely to win" effect simulated hash power
-        // is meant to produce.
+        // Chosen much lower than an unbounded search would need, because
+        // MineBlock only gets a bounded number of attempts per turn (a
+        // node's HashPower — see the "Mining" note in README.md): at shift 8,
+        // a single attempt succeeds with probability 1/256, so a regular
+        // (HashPower 1) node still has a real, if modest, chance each turn,
+        // while a node with HashPower 1000 succeeds on the vast majority of
+        // its turns — exactly the "1000x more likely to win" effect
+        // simulated hash power is meant to produce.
         public const int InitialDifficultyShift = 8;
 
         public static readonly BigInteger MaxTarget = (BigInteger.One << 256) - 1;
@@ -261,9 +260,9 @@ namespace BitcoinNetworkSimulator
             ComputeBalances(chain).GetValueOrDefault(account);
     }
 
-    // Thread-safe append-only chain shared by the JSON persistence layer.
-    // Each "node" below keeps its OWN copy of a Blockchain to simulate a real
-    // distributed system where nodes can (and, in this naive design, do) disagree.
+    // Thread-safe append-only chain. Each "node" below keeps its OWN copy of
+    // a Blockchain to simulate a real distributed system where nodes can
+    // (and, in this naive design, do) disagree.
     public class Blockchain
     {
         private readonly object _lock = new();
@@ -336,8 +335,8 @@ namespace BitcoinNetworkSimulator
         //     signing key (see NodeIdentityRegistry) and the block's Signature
         //     must actually verify against that key — see the "Signed
         //     blocks" note in README.md
-        // Unlike the earlier coordinator-picked versions, being selected to build
-        // now genuinely costs something real: computational search work.
+        // Being selected to build a block genuinely costs something real:
+        // computational search work.
         private static (bool Ok, string Reason) ValidateChain(List<Block> candidate)
         {
             if (candidate == null || candidate.Count == 0)

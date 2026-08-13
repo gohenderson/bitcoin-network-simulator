@@ -32,9 +32,9 @@ namespace BitcoinNetworkSimulator
     // real HTTP listener (see NetworkServer.cs), which dispatches by node
     // id — the first path segment of a request, e.g.
     // http://localhost:5000/000-alpha/chain — and hands the rest of the
-    // route to that node's own HandleRequestAsync below. Node itself still
-    // owns everything about what a request DOES (validating and accepting
-    // what peers send it) — just not how it physically arrives anymore.
+    // route to that node's own HandleRequestAsync below. Node itself owns
+    // everything about what a request DOES (validating and accepting what
+    // peers send it), not how it physically arrives.
     // Mining lives entirely outside Node, in SoloMiner/PoolMiner/IMiner (see
     // Miner.cs) — NodeNetwork.AddNodeAsync (the
     // composition root) constructs a Node's Chain and Mempool once and
@@ -62,9 +62,7 @@ namespace BitcoinNetworkSimulator
 
         // `route` is the request path with this node's id segment already
         // stripped off by NetworkServer — e.g. "/chain" for a request to
-        // /000-alpha/chain — so the switch below reads exactly as it did
-        // back when each node had its own listener and AbsolutePath was
-        // the whole story.
+        // /000-alpha/chain.
         public async Task HandleRequestAsync(HttpListenerContext ctx, string route)
         {
             try

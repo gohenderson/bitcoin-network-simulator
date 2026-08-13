@@ -23,7 +23,7 @@ namespace BitcoinNetworkSimulator
     // ------------------------------------------------------------------
     public static class MiningScheduler
     {
-        // A turn that finds nothing (the common case now that MineBlock is
+        // A turn that finds nothing (the common case, since MineBlock is
         // bounded by HashPower — see the "Mining" note in README.md)
         // returns almost instantly, so without a pause here this loop
         // would spin a CPU core at ~100% doing essentially nothing. This delay

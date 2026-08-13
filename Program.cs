@@ -2,10 +2,9 @@
 // P2P network — real proof-of-work, gossip/reorg, coin issuance, balance
 // enforcement, mining pools, signed blocks, and a handful of deliberately
 // malicious node roles. See README.md for how the whole system works and
-// how to run it; the mechanism-specific comments that used to live here now
-// live next to the code they explain (ProofOfWork, Economics, Ledger,
-// Blockchain.ValidateChain, and the MINING POOLS / BUILTBY SIGNING notes in
-// Miner.cs).
+// how to run it; the mechanism-specific comments live next to the code they
+// explain (ProofOfWork, Economics, Ledger, Blockchain.ValidateChain, and the
+// MINING POOLS / BUILTBY SIGNING notes in Miner.cs).
 
 using System;
 using System.Collections.Generic;
@@ -46,15 +45,14 @@ namespace BitcoinNetworkSimulator
             // growth behavior, and duration — see "Scenarios" in README.md.
             // `dotnet run -- path/to/scenario.json` picks a
             // specific file; otherwise scenario.json next to the executable
-            // is used if present. No file at all means the normal
-            // single-node, indefinite-runtime default, unchanged from before
-            // this feature existed.
+            // is used if present. No file at all means a normal
+            // single-node, indefinite-runtime default.
             var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.json");
             var scenario = await ScenarioLoader.LoadAsync(scenarioPath);
 
             // Every run's node folders and watcher.db land under
-            // their own timestamped ScenarioResults/ subfolder from this
-            // point on — see "Scenarios" in README.md.
+            // their own timestamped ScenarioResults/
+            // subfolder — see "Scenarios" in README.md.
             RunRootDir = ScenarioLoader.DetermineRunRootDir(scenarioPath, scenario);
             Console.WriteLine($"Results: {RunRootDir}\n");
 
