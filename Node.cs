@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -42,6 +43,16 @@ namespace BitcoinNetworkSimulator
     // itself holds no reference to it and knows nothing about mining,
     // roles, hash power, or pools; the round-robin scheduler talks to
     // IMiners directly, never through Node.
+    //
+    // Node also relays: since each node only gossips directly to its own
+    // limited peer set (see the "Peer topology" note in README.md) rather
+    // than the whole network, a block or chain accepted from one peer is
+    // forwarded on to this node's OTHER peers (RelayBlockAsync/
+    // RelayChainAsync below) so it keeps propagating hop by hop. This only
+    // ever fires on a genuine state change (Chain.TryAppend/
+    // TryReplaceWithLongerChain succeeding), so a peer re-relaying something
+    // this node already has is just a harmless, self-terminating rejection
+    // — the same property real flood-fill gossip relies on.
     // ------------------------------------------------------------------
 
     public class Node
@@ -51,13 +62,18 @@ namespace BitcoinNetworkSimulator
         public ConcurrentQueue<Transaction> Mempool { get; }
 
         private readonly ChainWatcher _watcher;
+        private readonly int _serverPort;
+        private readonly Func<List<string>> _getPeerIds;
+        private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
 
-        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher)
+        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, int serverPort, Func<List<string>> getPeerIds)
         {
             Id = id;
             Chain = chain;
             Mempool = mempool;
             _watcher = watcher;
+            _serverPort = serverPort;
+            _getPeerIds = getPeerIds;
         }
 
         // `route` is the request path with this node's id segment already
@@ -137,6 +153,7 @@ namespace BitcoinNetworkSimulator
                                     Console.WriteLine($"[{Id}] accepted block #{block.Index} built by {block.BuiltBy} (validated: parent + target + hash + coinbase + tx checks passed)");
                                     _watcher.ObserveAccepted(Id, block);
                                     responseBody = "{\"status\":\"appended\"}";
+                                    _ = RelayBlockAsync(block);
                                 }
                                 else
                                 {
@@ -170,6 +187,7 @@ namespace BitcoinNetworkSimulator
                                     Console.WriteLine($"[{Id}] REORGANIZED: {reason}");
                                     _watcher.ObserveReorganization(Id, reason);
                                     responseBody = JsonSerializer.Serialize(new { status = "reorganized", reason });
+                                    _ = RelayChainAsync(candidate);
                                 }
                                 else
                                 {
@@ -199,6 +217,49 @@ namespace BitcoinNetworkSimulator
             catch (Exception ex)
             {
                 Console.WriteLine($"[{Id}] request error: {ex.Message}");
+            }
+        }
+
+        // Forwards a block/chain this node just accepted from one peer on to
+        // its OTHER peers, so it keeps propagating hop by hop across a peer
+        // graph where no single node is connected to everyone — see the
+        // "Peer topology" note in README.md. Best-effort and fire-and-forget
+        // (called via `_ = RelayBlockAsync(...)`, never awaited by the
+        // request handler): a peer that's unreachable or already has this
+        // block just gets skipped or rejects it, same as any other gossip.
+        private async Task RelayBlockAsync(Block block)
+        {
+            var json = JsonSerializer.Serialize(block);
+            foreach (var peerId in _getPeerIds())
+            {
+                if (peerId == Id) continue;
+                try
+                {
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveBlock", content);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{Id}] couldn't relay block #{block.Index} to peer {peerId}: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task RelayChainAsync(List<Block> chain)
+        {
+            var json = JsonSerializer.Serialize(chain);
+            foreach (var peerId in _getPeerIds())
+            {
+                if (peerId == Id) continue;
+                try
+                {
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveChain", content);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{Id}] couldn't relay chain to peer {peerId}: {ex.Message}");
+                }
             }
         }
     }
@@ -299,6 +360,18 @@ namespace BitcoinNetworkSimulator
         // role's Pool value, if set, is ignored and it always mines solo. See
         // the "Mining pools" note in README.md.
         public string? Pool { get; set; } = null;
+        // How heavily this node is weighted when other nodes are choosing
+        // their outbound peers (see NodeNetwork.ChooseWeightedPeers) — 1 is
+        // an ordinary node. A node with EconomicWeight 20 is 20x as likely
+        // to be picked as an outbound peer by any given other node, so it
+        // ends up with a disproportionate number of inbound connections and
+        // becomes a structural hub in the peer graph — modeling the real
+        // Bitcoin dynamic where well-run, publicly-reachable nodes (often
+        // run by economically significant operators — exchanges, payment
+        // processors) end up relaying for far more of the network than an
+        // ordinary node does, without any special protocol role. See the
+        // "Peer topology" note in README.md.
+        public int EconomicWeight { get; set; } = 1;
         // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
         // — see the "Signed blocks" note in README.md. Unlike every other
         // field here, this one should never be hand-edited or deleted once a
@@ -449,6 +522,7 @@ namespace BitcoinNetworkSimulator
                     metadata.HashPower = group.HashPower;
                     metadata.CanMine = group.CanMine;
                     metadata.Pool = group.Pool;
+                    metadata.EconomicWeight = group.EconomicWeight;
                     if (string.IsNullOrEmpty(metadata.SigningKey))
                         metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

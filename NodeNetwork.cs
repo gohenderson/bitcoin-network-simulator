@@ -16,6 +16,19 @@ namespace BitcoinNetworkSimulator
     // in AddNodeAsync. Nothing downstream (MiningScheduler) ever has to
     // re-derive solo-vs-pooled; it only ever sees the finished IMiner list.
     //
+    // Also owns the peer graph — see the "Peer topology" note in README.md.
+    // Real Bitcoin nodes don't form a full mesh: each keeps a small, fixed
+    // number of outbound connections, and well-run, publicly-reachable
+    // nodes end up with far more inbound connections than an ordinary one
+    // simply because more peers independently choose them. AddNodeAsync
+    // models that at creation time: a new node draws _outboundPeerCount
+    // peers via weighted random sampling (weight = EconomicWeight) from
+    // whoever already exists, and the resulting edges are bidirectional.
+    // SoloMiner and Node both gossip/relay only to a node's own peer set,
+    // not the whole network — a node with disproportionately high
+    // EconomicWeight ends up disproportionately connected, i.e. a
+    // structural hub, without any special protocol role.
+    //
     // Owns node creation (AddNodeAsync) and organic growth (GrowthLoopAsync).
     // Program.cs is the only caller; MiningScheduler and TransactionGenerator
     // only ever read through the snapshot accessors below.
@@ -24,6 +37,7 @@ namespace BitcoinNetworkSimulator
     {
         public const int DefaultMaxNodes = 100;
         public const int DefaultGrowthIntervalMs = 8000; // roughly double the network every 8 s — see GrowthLoopAsync
+        public const int DefaultOutboundPeerCount = 8; // matches real Bitcoin's default outbound connection count
 
         private static readonly string[] GreekNames =
         {
@@ -63,7 +77,9 @@ namespace BitcoinNetworkSimulator
 
         private readonly string _runRootDir;
         private readonly int _port;
+        private readonly int _outboundPeerCount;
         private readonly Random _rng = new();
+        private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
 
         // All mutable registry state below is guarded by this one lock —
         // nodes call the getters at broadcast time so newly joined peers are
@@ -77,10 +93,21 @@ namespace BitcoinNetworkSimulator
         private readonly List<IMiner> _allMiners = new();
         private readonly Dictionary<string, PoolMiner> _poolMinersByName = new();
 
-        public NodeNetwork(string runRootDir, int port)
+        // Peer-graph state — see the "Peer topology" note in README.md.
+        // _peerIdsByNodeId holds bidirectional edges: when node A picks node
+        // B as one of its outbound peers, both A's and B's sets gain each
+        // other, mirroring a real, once-open TCP connection relaying in both
+        // directions. _economicWeightByNodeId is a node's own weight,
+        // recorded at creation so later-joining nodes can weight their own
+        // outbound picks against it.
+        private readonly Dictionary<string, HashSet<string>> _peerIdsByNodeId = new();
+        private readonly Dictionary<string, int> _economicWeightByNodeId = new();
+
+        public NodeNetwork(string runRootDir, int port, int outboundPeerCount)
         {
             _runRootDir = runRootDir;
             _port = port;
+            _outboundPeerCount = outboundPeerCount;
         }
 
         public List<string> GetAllNodeIds() { lock (_lock) { return new List<string>(_allNodeIds); } }
@@ -96,6 +123,13 @@ namespace BitcoinNetworkSimulator
         public string? CurrentTipHash() { lock (_lock) { return _allNodes.Count > 0 ? _allNodes[0].Chain.Latest.Hash : null; } }
 
         public List<IMiner> SnapshotMiners() { lock (_lock) { return new List<IMiner>(_allMiners); } }
+
+        // This node's current outbound-and-inbound peer set — see the "Peer
+        // topology" note in README.md. Handed to both SoloMiner (as its
+        // gossip broadcast target) and Node (as its relay target) at
+        // creation time; both always see the same peer set for a given node
+        // since it's the one underlying registry entry.
+        private List<string> PeerIdsFor(string nodeId) { lock (_lock) { return _peerIdsByNodeId.TryGetValue(nodeId, out var set) ? new List<string>(set) : new List<string>(); } }
 
         public List<Task> SnapshotPersistTasks() { lock (_lock) { return new List<Task>(_persistTasks); } }
 
@@ -114,16 +148,41 @@ namespace BitcoinNetworkSimulator
         public async Task AddNodeAsync(ChainWatcher watcher, CancellationToken token)
         {
             int index;
-            lock (_lock) { index = _allNodeIds.Count; }
+            List<string> existingIds;
+            Dictionary<string, int> existingWeights;
+            lock (_lock)
+            {
+                index = _allNodeIds.Count;
+                existingIds = new List<string>(_allNodeIds);
+                existingWeights = new Dictionary<string, int>(_economicWeightByNodeId);
+            }
 
             var id = NodeNameFor(index);
 
             Directory.CreateDirectory(NodeDirFor(id));
             var metadata = await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index), AssignCanMine(index));
 
+            // Picked from every node that exists so far (this node's own id
+            // isn't in existingIds yet) — see the "Peer topology" note in
+            // README.md. A node born with no peers yet (e.g. the very first
+            // one) simply starts isolated and bootstraps connectivity as
+            // later-joining nodes independently pick it.
+            var outboundPeers = ChooseWeightedPeers(existingIds, existingWeights, _outboundPeerCount, _peerSelectionRng);
+
             lock (_lock)
             {
                 _allNodeIds.Add(id);
+                _economicWeightByNodeId[id] = metadata.EconomicWeight;
+                if (!_peerIdsByNodeId.TryGetValue(id, out var mySet))
+                    _peerIdsByNodeId[id] = mySet = new HashSet<string>();
+
+                foreach (var peerId in outboundPeers)
+                {
+                    mySet.Add(peerId);
+                    if (!_peerIdsByNodeId.TryGetValue(peerId, out var peerSet))
+                        _peerIdsByNodeId[peerId] = peerSet = new HashSet<string>();
+                    peerSet.Add(id);
+                }
             }
             watcher.AddNode(id);
 
@@ -135,8 +194,9 @@ namespace BitcoinNetworkSimulator
             var chain = new Blockchain();
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, chain, mempool, GetAllNodeIds, watcher, signingKey);
-            var node = new Node(id, chain, mempool, watcher);
+            Func<List<string>> getPeerIds = () => PeerIdsFor(id);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, chain, mempool, getPeerIds, watcher, signingKey);
+            var node = new Node(id, chain, mempool, watcher, _port, getPeerIds);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
 
@@ -173,7 +233,40 @@ namespace BitcoinNetworkSimulator
                 }
             }
 
-            Console.WriteLine($"[network] node #{index} ({id}, {metadata.NodeRole}, hashPower={metadata.HashPower}, canMine={metadata.CanMine}, pool={metadata.Pool ?? "(solo)"}) joined at /{id}/ — total: {index + 1}");
+            var peerCountSoFar = PeerIdsFor(id).Count; // outbound picks now, plus any earlier node that already picked this one back — grows further as later nodes join
+            Console.WriteLine($"[network] node #{index} ({id}, {metadata.NodeRole}, hashPower={metadata.HashPower}, canMine={metadata.CanMine}, pool={metadata.Pool ?? "(solo)"}, economicWeight={metadata.EconomicWeight}) joined at /{id}/ — {outboundPeers.Count} outbound peer(s), {peerCountSoFar} peer(s) total so far — total: {index + 1}");
+        }
+
+        // Weighted random sampling WITHOUT replacement: draws up to `count`
+        // distinct ids from `candidateIds`, each draw weighted by that
+        // candidate's entry in `weights` (defaulting to 1 if somehow
+        // missing). Same weighted-draw shape as PoolMiner.WeightedRandomMember,
+        // just repeated with the chosen candidate removed from the pool each
+        // time so a node never picks the same peer twice. Returns fewer than
+        // `count` ids once candidateIds is exhausted — expected for
+        // early-joining nodes when few others exist yet.
+        private static List<string> ChooseWeightedPeers(List<string> candidateIds, Dictionary<string, int> weights, int count, Random rng)
+        {
+            var pool = new List<string>(candidateIds);
+            var chosen = new List<string>();
+            var take = Math.Min(count, pool.Count);
+
+            for (var i = 0; i < take; i++)
+            {
+                var totalWeight = pool.Sum(c => weights.GetValueOrDefault(c, 1));
+                var roll = rng.Next(totalWeight);
+                var cumulative = 0;
+                var picked = pool[^1];
+                foreach (var candidate in pool)
+                {
+                    cumulative += weights.GetValueOrDefault(candidate, 1);
+                    if (roll < cumulative) { picked = candidate; break; }
+                }
+                chosen.Add(picked);
+                pool.Remove(picked);
+            }
+
+            return chosen;
         }
 
         // Roughly exponential growth, not linear: each tick, as many new nodes

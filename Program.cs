@@ -58,6 +58,7 @@ namespace BitcoinNetworkSimulator
 
             var effectiveMaxNodes = scenario?.MaxNodes ?? NodeNetwork.DefaultMaxNodes;
             var effectiveGrowthIntervalMs = scenario?.GrowthIntervalSeconds is int gis ? gis * 1000 : NodeNetwork.DefaultGrowthIntervalMs;
+            var effectiveOutboundPeerCount = scenario?.OutboundPeerCount ?? NodeNetwork.DefaultOutboundPeerCount;
             var autoGrowthEnabled = scenario?.AutoGrowth ?? true;
 
             if (scenario != null)
@@ -77,7 +78,7 @@ namespace BitcoinNetworkSimulator
             using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, scenario != null ? scenarioPath : null, scenario?.Description);
             var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
-            var network = new NodeNetwork(RunRootDir, Port);
+            var network = new NodeNetwork(RunRootDir, Port, effectiveOutboundPeerCount);
 
             // One shared listener for the whole network — see
             // NetworkServer.cs — dispatching every request by the node id in

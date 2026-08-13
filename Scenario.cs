@@ -43,6 +43,11 @@ namespace BitcoinNetworkSimulator
         public int? GrowthIntervalSeconds { get; set; }
         public int? MaxNodes { get; set; }
 
+        // How many outbound peers each node picks at creation — see the
+        // "Peer topology" note in README.md. Null means
+        // NodeNetwork.DefaultOutboundPeerCount (8, matching real Bitcoin).
+        public int? OutboundPeerCount { get; set; }
+
         // Each entry describes Count identically-configured nodes to create
         // up front, applied in the order listed — e.g. a group of 10 plain
         // nodes followed by a group of 5 nodes in "poolA" creates 15 nodes
@@ -67,6 +72,11 @@ namespace BitcoinNetworkSimulator
         public int HashPower { get; set; } = 1;
         public bool CanMine { get; set; } = true;
         public string? Pool { get; set; } = null;
+        // See NodeMetadata.EconomicWeight and the "Peer topology" note in
+        // README.md. 1 is an ordinary node; higher values make this group's
+        // nodes proportionally more likely to be picked as another node's
+        // outbound peer, turning them into structural hubs.
+        public int EconomicWeight { get; set; } = 1;
     }
 
     public static class ScenarioLoader

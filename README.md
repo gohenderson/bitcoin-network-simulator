@@ -36,6 +36,20 @@ behaviors — not to be a secure or production-grade implementation. See
   local chain after every block they build; any peer adopts a received
   chain whenever it's strictly longer, shares the same genesis, and is
   fully valid.
+- **Peer topology.** Nodes don't form a full mesh — each keeps a small,
+  fixed number of outbound peers (`OutboundPeerCount`, default 8, matching
+  real Bitcoin), chosen at creation by weighted random sampling from
+  whoever already exists (weight = `EconomicWeight`). Connections are
+  bidirectional, so a node with a much higher `EconomicWeight` than its
+  peers accumulates disproportionately many inbound connections and becomes
+  a structural hub — the same dynamic that makes real, well-run,
+  publicly-reachable nodes (often run by economically significant
+  operators — exchanges, payment processors) relay for far more of the
+  network than an ordinary node, without any special protocol role. A node
+  that accepts a new block or chain from one peer relays it on to its own
+  other peers, so it still reaches the whole network hop by hop as long as
+  the peer graph is connected. See `NodeNetwork.cs` and the "Peer
+  topology" fields under [Scenarios](#scenarios).
 - **Coin issuance.** Each block's winning miner earns a coinbase reward,
   starting at 50 coins and halving every 210 blocks (toy-scaled down from
   Bitcoin's 210,000), with the total ever minted hard-capped at 21,000,000.
@@ -133,9 +147,10 @@ fact. See [`Scenario.cs`](Scenario.cs) for the full format. Example:
 }
 ```
 
-- `NodeGroups` — starting nodes, applied in order, as `{Count, Role, HashPower, CanMine, Pool}` groups.
+- `NodeGroups` — starting nodes, applied in order, as `{Count, Role, HashPower, CanMine, Pool, EconomicWeight}` groups.
 - `AutoGrowth` (default `true`) — whether the network keeps growing organically on top of `NodeGroups`.
 - `GrowthIntervalSeconds` / `MaxNodes` — override organic growth's pace/cap.
+- `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
 - `DurationSeconds` — automatically stop after this many seconds (Enter still works too, to stop early).
 
 Included scenarios, in [`Scenarios/`](Scenarios/):
@@ -148,6 +163,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `wallet-only-network.json` | Mining-disabled, wallet-only nodes participating normally otherwise. |
 | `malicious-roles-showcase.json` | Each malicious node role in action (see below) and how honest nodes catch it. |
 | `large-scale-organic-growth.json` | A larger network growing over time. |
+| `economic-hub-topology.json` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
 
 ## Node roles
 
@@ -159,7 +175,7 @@ assumption, to demonstrate that the network catches it:
 | `Equivocator` | Mines two separate valid blocks at the same height to fork the chain. | Real proof-of-work makes this genuinely costly — a deliberate fork, not a free action. |
 | `Impersonator` | Claims another node's identity (`BuiltBy`) to redirect a reward. | Can only sign with its own key, which never verifies against the name it's framing. |
 | `Corruptor` | Tampers with a block after finding a valid nonce. | The recomputed hash no longer matches the block's contents, and a tampered hash essentially never still satisfies the target. |
-| `Withholder` | Only tells some peers about a new block. | Peers catch up via the next round's full-chain gossip. |
+| `Withholder` | Only tells some peers about a new block. | The peers it does tell may relay it onward to the ones it excluded; any peer still behind catches up via the next round's full-chain gossip regardless. |
 
 ## Persistence & resume
 
@@ -223,13 +239,13 @@ reconstructing reports or charting a run's progression over time.
 | File | Responsibility |
 |---|---|
 | `Program.cs` | Entry point / composition root: reads the scenario, builds a `NodeNetwork`, and starts the mining scheduler, transaction generator, growth loop, watcher, and persistence loops as async tasks. |
-| `NodeNetwork.cs` | The live network: the node/miner registry, node naming and default role/mining-participation policy, node creation (`AddNodeAsync`), and organic growth (`GrowthLoopAsync`). |
+| `NodeNetwork.cs` | The live network: the node/miner registry, the peer graph (weighted outbound peer selection — see [Peer topology](#how-it-works)), node naming and default role/mining-participation policy, node creation (`AddNodeAsync`), and organic growth (`GrowthLoopAsync`). |
 | `MiningScheduler.cs` | Round-robin turn scheduling across whatever `IMiner`s currently exist — solo or pooled, reshuffled whenever a new block appears. |
 | `TransactionGenerator.cs` | Synthetic transaction traffic: picks a real sender/recipient pair from live balances each round and submits a transaction. |
 | `PersistenceLoop.cs` | Per-node persistence: resumes a node's chain from its `blockchain.db` at startup, then periodically syncs it back for the rest of the run. |
 | `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
-| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, signing key — and its `metadata.json` load/save/apply logic). |
+| `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc., including relaying an accepted block/chain on to this node's own other peers. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, economic weight, signing key — and its `metadata.json` load/save/apply logic). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
 | `Scenario.cs` | Scenario file format and loader; also computes each run's `ScenarioResults/` result directory. |
@@ -249,3 +265,8 @@ reconstructing reports or charting a run's progression over time.
   50-coin initial reward), the reward series naturally converges to 21,000
   coins, not the enforced 21,000,000-coin cap — the cap is real but doesn't
   end up binding with these particular numbers.
+- A node's outbound peers are chosen once, at creation, and never rotate or
+  get evicted for the rest of the run — real Bitcoin periodically refreshes
+  connections. There's also no cap on inbound connections (real Bitcoin
+  defaults to ~125 total); a high-`EconomicWeight` node can accumulate an
+  unbounded number of peers.

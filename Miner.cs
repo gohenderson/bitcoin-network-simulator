@@ -54,7 +54,7 @@ namespace BitcoinNetworkSimulator
         private readonly NodeRole _role;
         private readonly Blockchain _chain;
         private readonly ConcurrentQueue<Transaction> _mempool;
-        private readonly Func<List<string>> _getAllNodeIds;
+        private readonly Func<List<string>> _getPeerIds;
         private readonly ChainWatcher _watcher;
         private readonly ECDsa _signingKey;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
@@ -64,7 +64,7 @@ namespace BitcoinNetworkSimulator
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
         public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, Blockchain chain, ConcurrentQueue<Transaction> mempool,
-            Func<List<string>> getAllNodeIds, ChainWatcher watcher, ECDsa signingKey)
+            Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
             _serverPort = serverPort;
@@ -72,7 +72,7 @@ namespace BitcoinNetworkSimulator
             HashPower = Math.Max(1, hashPower);
             _chain = chain;
             _mempool = mempool;
-            _getAllNodeIds = getAllNodeIds;
+            _getPeerIds = getPeerIds;
             _watcher = watcher;
             _signingKey = signingKey;
             NodeIdentityRegistry.Register(Id, _signingKey.ExportSubjectPublicKeyInfo());
@@ -203,7 +203,7 @@ namespace BitcoinNetworkSimulator
 
             var fakeIdentity = _role == NodeRole.Impersonator;
             var builtBy = fakeIdentity
-                ? (_getAllNodeIds().Where(n => n != Id).OrderBy(_ => _rng.Next()).FirstOrDefault() ?? Id)
+                ? (_getPeerIds().Where(n => n != Id).OrderBy(_ => _rng.Next()).FirstOrDefault() ?? Id)
                 : Id;
 
             var txs = new List<Transaction>();
@@ -255,7 +255,7 @@ namespace BitcoinNetworkSimulator
                 Console.WriteLine($"[{Id}] (Corruptor) mined block #{block.Index} (nonce {block.Nonce}), then tampered with it after the fact");
             }
 
-            var currentPeers = _getAllNodeIds();
+            var currentPeers = _getPeerIds();
             var peersToNotify = currentPeers;
             if (_role == NodeRole.Withholder)
             {
@@ -347,7 +347,7 @@ namespace BitcoinNetworkSimulator
 
             _watcher.ObserveBuild(Id, block, _role);
             _chain.AppendTrusting(block);
-            var currentPeers = _getAllNodeIds();
+            var currentPeers = _getPeerIds();
             await SendBlock(block, currentPeers);
             await SendChain(currentPeers);
         }
@@ -407,7 +407,7 @@ namespace BitcoinNetworkSimulator
                 // honestly.
                 _watcher.ObserveBuild(Id, blockA, _role);
                 _chain.AppendTrusting(blockA);
-                var earlyPeers = _getAllNodeIds();
+                var earlyPeers = _getPeerIds();
                 await SendBlock(blockA, earlyPeers);
                 await SendChain(earlyPeers);
                 return;
@@ -418,7 +418,7 @@ namespace BitcoinNetworkSimulator
             _watcher.ObserveBuild(Id, blockB, _role);
             _chain.AppendTrusting(blockA);
 
-            var currentPeers = _getAllNodeIds();
+            var currentPeers = _getPeerIds();
             var others = currentPeers.Where(p => p != Id).OrderBy(_ => _rng.Next()).ToList();
             var half1 = others.Take(others.Count / 2).ToList();
             var half2 = others.Skip(others.Count / 2).ToList();
