@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: modest-chain
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 4
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 5 }
+
+Phases:
+  - Description: >-
+      Two ValueSeeking nodes mine the exact same ruleset (10 coins x $5 = $50 per win) but
+      carry very different overhead. Note: every block before the first difficulty retarget
+      (height 2016 by default) inherits the network's shared genesis target, which is always
+      real Bitcoin's own default difficulty regardless of what a ruleset's own
+      InitialDifficultyShift declares — that field only shapes ValueSeeking's profitability
+      RANKING between candidates, not actual early-game mining odds. At HashPower 20 that's
+      really a ~7.5% win probability per turn, so real expected income is closer to
+      ~$3.76/turn, not what a ruleset's own declared difficulty alone would suggest. solvent's
+      CostOfLiving ($0.20/turn) is comfortably below that, so its net worth climbs steadily
+      over $20 of StartingCapital and it never comes close to insolvency. doomed's CostOfLiving
+      ($100/turn) exceeds even a GUARANTEED win's $50 payout, so no amount of luck lets it keep
+      up — it burns through its $150 StartingCapital within its first few turns and gets forced
+      out of the network (churned) the moment accrued overhead exceeds its net worth, exactly
+      like a real business whose costs structurally exceed its revenue. Watch for "insolvent"
+      in the console.
+    DurationSeconds: 60
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 1
+        Role: Honest
+        HashPower: 20
+        CostOfLiving: 0.2
+        StartingCapital: 20
+        ValueSeeking: true
+        ValueSeekingCandidates: [modest-chain]
+      - Count: 1
+        Role: Honest
+        HashPower: 20
+        CostOfLiving: 100
+        StartingCapital: 150
+        ValueSeeking: true
+        ValueSeekingCandidates: [modest-chain]

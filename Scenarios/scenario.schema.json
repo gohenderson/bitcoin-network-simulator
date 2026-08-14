@@ -132,6 +132,18 @@
           "default": 0,
           "description": "$ cost of a single mining attempt (one nonce tried) — see \"Mining costs\" in README.md. Only consulted for a ValueSeeking group: if the best candidate's value doesn't clear CostPerAttempt x HashPower this turn, the group sits idle instead of mining at a guaranteed loss. Default 0 means mining is free (unchanged behavior)."
         },
+        "CostOfLiving": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "$ fixed cost this group's node owes every turn, REGARDLESS of whether it mines — unlike CostPerAttempt, which is only owed while attempting nonces. See \"Cost of living\" in README.md. Only meaningful for a ValueSeeking group. If accrued cost ever exceeds this node's on-chain net worth plus StartingCapital, it is forced out of the network (churned) — real hash power going bankrupt. Default 0 means no living cost (unchanged behavior)."
+        },
+        "StartingCapital": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "$ runway this group's node starts with, on top of its on-chain balance's market value, before CostOfLiving can push it into insolvency. Without this, a brand-new node with CostOfLiving set would go bankrupt on its very first turn."
+        },
         "CanMine": {
           "type": "boolean",
           "default": true,

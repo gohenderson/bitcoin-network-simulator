@@ -261,6 +261,18 @@ namespace BitcoinNetworkSimulator
         // No effect on a group using a fixed RulesName/RuleSchedule, which was
         // never a profitability decision to begin with.
         public decimal CostPerAttempt { get; set; } = 0m;
+        // $ fixed cost this group's node owes every turn, REGARDLESS of whether it
+        // mines — unlike CostPerAttempt (only owed while attempting nonces). See
+        // "Cost of living" in README.md. Only meaningful for a ValueSeeking group
+        // (needs PriceSchedule data to value its own coin balance in $ terms); no
+        // effect otherwise. Default 0 means no living cost (today's behavior,
+        // unchanged) — a group must opt in explicitly.
+        public decimal CostOfLiving { get; set; } = 0m;
+        // $ runway this group's node starts with, on top of its on-chain balance's
+        // market value, before CostOfLiving can push it into insolvency. Without
+        // this, a brand-new node with CostOfLiving set would go bankrupt on its
+        // very first turn (zero balance, zero income yet). Default 0.
+        public decimal StartingCapital { get; set; } = 0m;
         public bool CanMine { get; set; } = true;
         public string? Pool { get; set; } = null;
         // See NodeMetadata.EconomicWeight and the "Peer topology" note in

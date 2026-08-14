@@ -359,6 +359,18 @@ namespace BitcoinNetworkSimulator
         public decimal BestValueAt(int height) =>
             _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Value : decimal.MaxValue;
 
+        // Whether this schedule is in value-seeking mode — used by SoloMiner to
+        // gate cost-of-living tracking, which only makes sense for a node with
+        // PriceSchedule data to value its own balance against.
+        public bool IsValueSeeking => _valueSeekingCandidates.Count > 0;
+
+        // The price of whichever candidate is currently most profitable — 0m in
+        // static mode (no PriceSchedule concept to draw from). Used by SoloMiner
+        // to value its own on-chain balance in $ terms for the cost-of-living
+        // solvency check — see "Cost of living" in README.md.
+        public decimal CurrentPriceAt(int height) =>
+            _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Price : 0m;
+
         // Picks whichever candidate's expected value (win probability x
         // NominalBlockReward x price-at-height) is highest; first-in-list wins an
         // exact tie (deterministic, same list order on every node). Falls back to
@@ -367,16 +379,17 @@ namespace BitcoinNetworkSimulator
         // has activated yet).
         private ConsensusRules MostProfitableAt(int height)
         {
-            var (best, value) = BestCandidateAt(height);
+            var (best, value, _) = BestCandidateAt(height);
             return (best != null && value > 0m) ? best : new ConsensusRules();
         }
 
-        // Shared by MostProfitableAt and BestValueAt so both only ever walk
-        // _valueSeekingCandidates once, from one place.
-        private (ConsensusRules? Rules, decimal Value) BestCandidateAt(int height)
+        // Shared by MostProfitableAt, BestValueAt, and CurrentPriceAt so all
+        // three only ever walk _valueSeekingCandidates once, from one place.
+        private (ConsensusRules? Rules, decimal Value, decimal Price) BestCandidateAt(int height)
         {
             ConsensusRules? best = null;
             var bestValue = 0m;
+            var bestPrice = 0m;
             foreach (var candidate in _valueSeekingCandidates)
             {
                 var price = PriceAt(candidate.PriceSchedule, height);
@@ -386,9 +399,10 @@ namespace BitcoinNetworkSimulator
                 {
                     best = candidate.Rules;
                     bestValue = value;
+                    bestPrice = price;
                 }
             }
-            return (best, bestValue);
+            return (best, bestValue, bestPrice);
         }
 
         private static decimal PriceAt(List<PriceScheduleEntry> schedule, int height)

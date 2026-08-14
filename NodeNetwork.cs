@@ -305,7 +305,16 @@ namespace BitcoinNetworkSimulator
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
             Func<List<string>> getPeerIds = () => PeerIdsFor(id);
             Action<string> discouragePeer = peerId => DiscouragePeer(id, peerId);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
+            // Lets a SoloMiner remove ITSELF from the network on insolvency — reuses
+            // the exact same RemoveNode churn already used by ChurnLoopAsync, just
+            // triggered by this node's own economics instead of the random churn
+            // tick. Safe to call mid-turn: RemoveNode is idempotent (no-ops if the
+            // node is already gone) and only mutates NodeNetwork's own in-memory
+            // registries under its own lock — it doesn't affect the scheduler's
+            // already-in-flight iteration, which will simply stop seeing this miner
+            // on its next fresh SnapshotMiners() call.
+            Action requestForcedChurn = () => RemoveNode(id, watcher);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, _port, getPeerIds, discouragePeer);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);

@@ -416,6 +416,14 @@ namespace BitcoinNetworkSimulator
         // restart-safety reason every other group-authored field is. 0 (default)
         // means mining is free, same as omitting it entirely.
         public decimal CostPerAttempt { get; set; } = 0m;
+        // $ fixed cost owed every turn regardless of outcome — see
+        // ScenarioNodeGroup.CostOfLiving. Persisted for the same restart-safety
+        // reason every other group-authored field is. 0 (default) means no
+        // living cost, same as omitting it entirely.
+        public decimal CostOfLiving { get; set; } = 0m;
+        // $ runway on top of on-chain net worth before CostOfLiving can push
+        // this node into insolvency — see ScenarioNodeGroup.StartingCapital.
+        public decimal StartingCapital { get; set; } = 0m;
         // Whether this node ever gets a mining turn. A node with CanMine false
         // still does everything else a full node does — serves /chain, /tx,
         // /balances, receives and validates blocks and chains from peers, holds
@@ -611,6 +619,8 @@ namespace BitcoinNetworkSimulator
             metadata.RuleSchedule = group.ResolvedRuleSchedule;
             metadata.ValueSeekingCandidates = group.ResolvedValueSeekingCandidates;
             metadata.CostPerAttempt = group.CostPerAttempt;
+            metadata.CostOfLiving = group.CostOfLiving;
+            metadata.StartingCapital = group.StartingCapital;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

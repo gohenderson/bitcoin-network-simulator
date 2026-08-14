@@ -390,6 +390,30 @@ third price stage, where both rulesets' expected value collapses under
 its `CostPerAttempt: 2` / `HashPower: 20` group (threshold `40`) and the
 group goes idle.
 
+**Cost of living.** `CostPerAttempt` is *variable* — a node dodges it
+entirely by going idle. Real operations also carry *fixed* overhead (rent,
+staff, hosting) owed every period whether or not any work happens that
+period. `CostOfLiving` (a per-`NodeGroups` field, default `0`) models
+that: a $ bill owed every turn *regardless of outcome* — mining, idle, or
+otherwise — so idling no longer dodges it. It's compared against this
+node's actual on-chain balance's current $ value (coins held, from
+`Ledger.ComputeBalances`, times its currently-active candidate's price) —
+not settled via an actual on-chain transaction, since there's no natural
+recipient and letting a node "spend" what it doesn't have would
+contradict the insufficient-balance rule that holds everywhere else in
+this codebase. Concretely: `CostOfLiving` accrues turn over turn into a
+running total, and the moment that total exceeds this node's net worth
+plus `StartingCapital` (a $ runway a node starts with, so a brand-new node
+with zero balance and zero income isn't judged bankrupt on turn one), the
+node is **insolvent** and forced out of the network — the same churn
+`ChurnLoopAsync` already uses, just triggered by this node's own economics
+instead of a random tick. Only meaningful for a `ValueSeeking` group,
+which is the only kind with `PriceSchedule` data to value its own balance
+against. See `Scenarios/mining-bankruptcy.yaml`, where a node whose
+`CostOfLiving` structurally exceeds even its best-case mining income goes
+bankrupt within its first few turns, watched over by a comfortably solvent
+one mining the same ruleset.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -474,6 +498,8 @@ Per-NodeGroup fields:
 - `Role` (default `Honest`) — see [Node roles](#node-roles) below.
 - `HashPower` (default `1`) — simulated hash power; see the "Mining" note above.
 - `CostPerAttempt` (default `0`, mining is free) — see the "Mining costs" note above. `$` cost per nonce tried; only consulted for a `ValueSeeking` group, which sits idle instead of mining any turn its best candidate doesn't clear `CostPerAttempt x HashPower`.
+- `CostOfLiving` (default `0`, no living cost) — see the "Cost of living" note above. `$` fixed cost owed every turn regardless of outcome; only consulted for a `ValueSeeking` group, which is forced out of the network (churned) once accrued cost exceeds its on-chain net worth plus `StartingCapital`.
+- `StartingCapital` (default `0`) — see the "Cost of living" note above. `$` runway a node starts with, on top of its on-chain balance's market value, before `CostOfLiving` can push it into insolvency.
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
@@ -496,7 +522,7 @@ can't be:
 - `Name` — how a `NodeGroups` entry's `RulesName` refers to this entry. Keep unique — a duplicate `Name` is a scenario-authoring mistake (the last one silently wins).
 - `RetargetIntervalBlocks` / `TargetSecondsPerBlock` — how often (in blocks) difficulty retargets, and how long a block "should" take on average. Default `2016` / `600` (10 minutes).
 - `MinAdjustmentFactor` / `MaxAdjustmentFactor` — clamp on how much a single retarget can swing the target. Default `0.25` / `4.0` (already real Bitcoin's own clamp).
-- `InitialDifficultyShift` — starting difficulty (higher = harder). Default `8` — see [What this is not](#what-this-is-not) for why this one stays simulation-scaled.
+- `InitialDifficultyShift` — starting difficulty (higher = harder). Default `8` — see [What this is not](#what-this-is-not) for why this one stays simulation-scaled. Note: every chain's actual per-block target inherits its genesis block's — which is always this same default `8`, not whatever a custom ruleset declares here — until the first real retarget (`RetargetIntervalBlocks`, default `2016`, blocks in); a non-default value here still shapes `ValueSeeking`'s profitability *ranking* between candidates (see "ValueSeeking" above) even though it won't change actual early-game mining odds until that point.
 - `InitialBlockReward` / `HalvingIntervalBlocks` — coinbase reward for the first block, and how often (in blocks) it halves. Default `50` / `210000`.
 - `MaxSupply` — hard cap on total coins ever minted. Default `21000000` — with the default `InitialBlockReward`/`HalvingIntervalBlocks` pair, the halving series actually converges to this asymptotically, so the cap binds for real, not just in theory.
 - `PriceSchedule` — this ruleset's $-reference value over height, as a list of `{ FromHeight, Price }` entries — see the "ValueSeeking" note above. Omitted means worth $0 at every height (never picked over any priced alternative by a `ValueSeeking` node).
@@ -515,6 +541,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `consensus-rule-switch.yaml` | Two groups start under the same rules; one switches to a different named `RuleSchedule` entry partway through and the other doesn't — a real, simulated hard fork. |
 | `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. A third price crash then drops both rulesets below `CostPerAttempt`, and the group goes idle rather than mine at a loss. |
 | `mining-difficulty-tradeoff.yaml` | Two `ValueSeeking` groups with very different `HashPower` see the exact same prices and rewards but reach opposite conclusions, because expected value also weighs each candidate's `InitialDifficultyShift` — the low-`HashPower` group can't realistically win the harder, richer ruleset and mines the easier one instead. |
+| `mining-bankruptcy.yaml` | Two `ValueSeeking` nodes mine the same ruleset with very different `CostOfLiving` — one comfortably outearns its overhead and survives indefinitely, the other's overhead structurally exceeds even its best-case income and it's forced out of the network (churned) once accrued cost exceeds its on-chain net worth. |
 
 ## Node roles
 

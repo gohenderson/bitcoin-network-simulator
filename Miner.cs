@@ -75,11 +75,25 @@ namespace BitcoinNetworkSimulator
         // going-idle/resuming-mining console lines only print on the transition,
         // not every single turn of what could be a long idle stretch.
         private bool _idleLastTurn = false;
+        // $ fixed cost owed every turn regardless of outcome — see
+        // ScenarioNodeGroup.CostOfLiving. 0 (default) disables the insolvency
+        // check in MineAndBroadcastSingleRoundAsync entirely.
+        private readonly decimal _costOfLiving;
+        // $ runway on top of on-chain net worth before CostOfLiving can push
+        // this node into insolvency — see ScenarioNodeGroup.StartingCapital.
+        private readonly decimal _startingCapital;
+        // Cumulative CostOfLiving owed since this node's creation — never
+        // reset, since "cumulative overhead exceeds cumulative wealth" is the
+        // right long-run solvency test; see MineAndBroadcastSingleRoundAsync.
+        private decimal _accruedLivingCost = 0m;
+        // Lets this SoloMiner remove ITSELF from the network on insolvency —
+        // see NodeNetwork.AddNodeAsync's requestForcedChurn closure.
+        private readonly Action _requestForcedChurn;
 
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
@@ -87,6 +101,9 @@ namespace BitcoinNetworkSimulator
             _role = role;
             HashPower = Math.Max(1, hashPower);
             _costPerAttempt = costPerAttempt;
+            _costOfLiving = costOfLiving;
+            _startingCapital = startingCapital;
+            _requestForcedChurn = requestForcedChurn;
             _ruleSchedule = ruleSchedule;
             _chain = chain;
             _mempool = mempool;
@@ -214,6 +231,28 @@ namespace BitcoinNetworkSimulator
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
             var height = parent.Index + 1;
+            var simulatedBalances = Ledger.ComputeBalances(ancestors); // hoisted — reused below AND by the insolvency check
+
+            // Cost of living: a FIXED bill owed every turn regardless of whether this
+            // node mines, unlike CostPerAttempt (only owed while actively trying
+            // nonces) — see "Cost of living" in README.md. Compared against this
+            // node's actual on-chain balance's current $ value, not settled via an
+            // on-chain transaction — there's no natural recipient, and letting a
+            // node "spend" what it doesn't have would contradict FilterAffordable's
+            // rule everywhere else. Accrues every turn regardless of outcome so
+            // idling doesn't dodge it; never resets, since "cumulative overhead
+            // exceeds cumulative wealth" is the right long-run solvency test.
+            if (_costOfLiving > 0m && _ruleSchedule.IsValueSeeking)
+            {
+                _accruedLivingCost += _costOfLiving;
+                var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
+                if (_accruedLivingCost > netWorth + _startingCapital)
+                {
+                    Console.WriteLine($"[{Id}] insolvent: accrued living cost {_accruedLivingCost} exceeds net worth {netWorth} plus starting capital {_startingCapital} — leaving the network");
+                    _requestForcedChurn();
+                    return;
+                }
+            }
 
             // Real operating cost (electricity, hardware) is the same regardless
             // of which candidate ruleset it's spent on, so it never changes WHICH
@@ -247,7 +286,6 @@ namespace BitcoinNetworkSimulator
                 : Id;
 
             var txs = new List<Transaction>();
-            var simulatedBalances = Ledger.ComputeBalances(ancestors);
             if (reward > 0m)
             {
                 txs.Add(new Transaction { From = Economics.CoinbaseSender, To = builtBy, Amount = reward });
