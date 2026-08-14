@@ -372,15 +372,17 @@ namespace BitcoinNetworkSimulator
         // ordinary node does, without any special protocol role. See the
         // "Peer topology" note in README.md.
         public int EconomicWeight { get; set; } = 1;
-        // The consensus/economics ruleset this node builds blocks under —
-        // see ConsensusRules' own comment in Blockchain.cs. Sourced from
-        // whichever ScenarioNodeGroup created this node (NodeGroups-authored
-        // nodes only — see LoadOrCreateFromGroupAsync); organically-grown
-        // and default-start nodes just get ConsensusRules' own defaults
-        // (real Bitcoin's own numbers). Persisted here so a restart's
-        // SoloMiner stamps the exact same rules it always has, not whatever
-        // this run's scenario happens to say now.
-        public ConsensusRules Rules { get; set; } = new();
+        // This node's own timeline of which ConsensusRules is active at
+        // which block height — see RuleSchedule's own comment in
+        // Blockchain.cs. Sourced from whichever ScenarioNodeGroup created
+        // this node (NodeGroups-authored nodes only — see
+        // LoadOrCreateFromGroupAsync); organically-grown and default-start
+        // nodes just get an empty schedule, which RuleSchedule.RulesForHeight
+        // treats as ConsensusRules' own defaults (real Bitcoin's own
+        // numbers) at every height. Persisted here so a restart's Blockchain
+        // and SoloMiner build/validate against the exact same schedule they
+        // always have, not whatever this run's scenario happens to say now.
+        public List<RuleScheduleEntry> RuleSchedule { get; set; } = new();
         // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
         // — see the "Signed blocks" note in README.md. Unlike every other
         // field here, this one should never be hand-edited or deleted once a
@@ -523,7 +525,7 @@ namespace BitcoinNetworkSimulator
             metadata.CanMine = group.CanMine;
             metadata.Pool = group.Pool;
             metadata.EconomicWeight = group.EconomicWeight;
-            metadata.Rules = group.ResolvedRules;
+            metadata.RuleSchedule = group.ResolvedRuleSchedule;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

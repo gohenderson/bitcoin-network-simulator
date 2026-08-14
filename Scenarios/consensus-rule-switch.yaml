@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  # Real Bitcoin's own numbers — see README.md's "Scenarios" section.
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+  # A deliberately different halving schedule, standing in for a contentious
+  # rule change (e.g. a real-world hard fork like Bitcoin Cash's larger
+  # blocks or a difficulty-algorithm change) — the specific numbers matter
+  # less than the fact that they're NOT real-bitcoin's.
+  - Name: upgraded
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 4
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      6 nodes, fixed, split into two groups: both start under real-bitcoin rules, but at
+      height 4 the "upgraded" group switches to a different named ruleset while the
+      "legacy" group keeps real-bitcoin rules unchanged. From that height on, each side
+      independently computes a DIFFERENT expected reward for the same block position — see
+      RuleSchedule in README.md's "Scenarios" section — so each side rejects the other's
+      blocks and the network splits into two competing chains, exactly like a real hard
+      fork. Watch the console for "declares an incorrect target"/coinbase-mismatch
+      rejections starting around height 4, and the watcher report for a DIVERGENCE verdict.
+      Compare with mining-pool-fairness.yaml, where both groups switch together and stay in
+      consensus.
+    DurationSeconds: 120
+    AutoGrowth: false
+    NodeGroups:
+    - Count: 3
+      Role: Honest
+      HashPower: 20
+      RuleSchedule:
+        - { FromHeight: 0, RulesName: real-bitcoin }
+        - { FromHeight: 4, RulesName: upgraded }
+    - Count: 3
+      Role: Honest
+      HashPower: 20
+      RulesName: real-bitcoin

@@ -138,7 +138,28 @@
         },
         "RulesName": {
           "type": "string",
-          "description": "Name of an entry in the scenario file's top-level NodeRules list — the consensus/economics ruleset this group's nodes build blocks under. Every block carries its builder's rules with it (see Blockchain.cs's ConsensusRules), so different groups genuinely can follow different rules within the same network — a block is valid if it correctly followed the rules IT declares, not some single value every node is forced to share. Omitted (or a name not defined in NodeRules) means every ConsensusRules field defaults."
+          "description": "Shorthand for a single-entry RuleSchedule ({ FromHeight: 0, RulesName }) — this group's ConsensusRules for its whole life, by name from the scenario file's top-level NodeRules list. Every node validates INCOMING blocks against its OWN currently-active rules for that height, not whatever a block itself claims (see Blockchain.cs's RuleSchedule) — so another group (or scenario) whose schedule agrees at a given height stays in consensus with this one, and one that disagrees diverges (a simulated fork), same as real Bitcoin vs. an incompatible fork client. Omitted (or a name not defined in NodeRules) means every ConsensusRules field defaults. Ignored (with a warning) if RuleSchedule is also set."
+        },
+        "RuleSchedule": {
+          "type": "array",
+          "description": "This group's full timeline of which named ruleset is active at which block height — e.g. real-bitcoin from height 0, switching to a different named ruleset from height 6 on. Takes precedence over RulesName if both are set.",
+          "items": { "$ref": "#/definitions/ruleScheduleEntry" }
+        }
+      }
+    },
+    "ruleScheduleEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["FromHeight"],
+      "properties": {
+        "FromHeight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The named ruleset below becomes active starting at this block height (inclusive), until a later entry (if any) supersedes it. Include a FromHeight: 0 entry to cover genesis onward — an empty gap before the first entry's FromHeight resolves to ConsensusRules' own defaults."
+        },
+        "RulesName": {
+          "type": "string",
+          "description": "Name of an entry in the scenario file's top-level NodeRules list, active from FromHeight on. Referencing a name not defined in NodeRules is a scenario-authoring mistake (logged as a warning; falls back to defaults for this entry)."
         }
       }
     },

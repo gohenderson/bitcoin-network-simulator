@@ -52,12 +52,14 @@ namespace BitcoinNetworkSimulator
 
         private readonly int _serverPort;
         private readonly NodeRole _role;
-        // The consensus/economics ruleset this node builds blocks under —
-        // see ConsensusRules' own comment in Blockchain.cs. Sourced from
-        // NodeMetadata.Rules at construction; every block this SoloMiner
-        // mines (solo, pooled, or either half of an Equivocator's pair) gets
-        // stamped with this same ruleset.
-        private readonly ConsensusRules _rules;
+        // This node's own timeline of which ConsensusRules is active at
+        // which height — see RuleSchedule's own comment in Blockchain.cs.
+        // Sourced from NodeMetadata.RuleSchedule at construction, and looked
+        // up fresh for the height being built each time this SoloMiner
+        // mines (solo, pooled, or either half of an Equivocator's pair) —
+        // NOT cached once, since the active ruleset can change from one
+        // height to the next.
+        private readonly RuleSchedule _ruleSchedule;
         private readonly Blockchain _chain;
         private readonly ConcurrentQueue<Transaction> _mempool;
         private readonly Func<List<string>> _getPeerIds;
@@ -69,14 +71,14 @@ namespace BitcoinNetworkSimulator
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, ConsensusRules rules, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
             _serverPort = serverPort;
             _role = role;
             HashPower = Math.Max(1, hashPower);
-            _rules = rules;
+            _ruleSchedule = ruleSchedule;
             _chain = chain;
             _mempool = mempool;
             _getPeerIds = getPeerIds;
@@ -142,7 +144,7 @@ namespace BitcoinNetworkSimulator
         // exhausted) or if we're shutting down. Runs synchronously (no awaits)
         // since it executes on this node's own dedicated LongRunning thread
         // already.
-        private Block? MineBlock(Block parent, string expectedTargetHex, List<Transaction> txs, string builtByLabel, int attempts, CancellationToken token)
+        private Block? MineBlock(Block parent, string expectedTargetHex, ConsensusRules rules, List<Transaction> txs, string builtByLabel, int attempts, CancellationToken token)
         {
             var candidate = new Block
             {
@@ -151,7 +153,7 @@ namespace BitcoinNetworkSimulator
                 BuiltBy = builtByLabel,
                 Transactions = txs,
                 Target = expectedTargetHex,
-                Rules = _rules,
+                Rules = rules,
                 Timestamp = DateTime.UtcNow
             };
 
@@ -202,9 +204,10 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
+            var rules = _ruleSchedule.RulesForHeight(height);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
+            var reward = Economics.ComputeBlockReward(ancestors, height, rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
@@ -223,7 +226,7 @@ namespace BitcoinNetworkSimulator
             }
             txs.AddRange(FilterAffordable(pending, simulatedBalances));
 
-            var block = MineBlock(parent, expectedTarget, txs, builtBy, HashPower, token);
+            var block = MineBlock(parent, expectedTarget, rules, txs, builtBy, HashPower, token);
             if (block == null)
             {
                 // This turn didn't win — none of our HashPower nonce attempts met
@@ -303,9 +306,10 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
+            var rules = _ruleSchedule.RulesForHeight(height);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
+            var reward = Economics.ComputeBlockReward(ancestors, height, rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
@@ -340,7 +344,7 @@ namespace BitcoinNetworkSimulator
 
             txs.AddRange(FilterAffordable(pending, simulatedBalances));
 
-            var block = MineBlock(parent, expectedTarget, txs, Id, totalHashPower, token);
+            var block = MineBlock(parent, expectedTarget, rules, txs, Id, totalHashPower, token);
             if (block == null)
             {
                 foreach (var tx in pending) _mempool.Enqueue(tx);
@@ -369,9 +373,10 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
+            var rules = _ruleSchedule.RulesForHeight(height);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
+            var reward = Economics.ComputeBlockReward(ancestors, height, rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
@@ -399,7 +404,7 @@ namespace BitcoinNetworkSimulator
             Console.WriteLine($"[{Id}] (Equivocator) mining TWO competing block #{parent.Index + 1}s in sequence — " +
                 "this costs roughly twice the work of an honest block");
 
-            var blockA = MineBlock(parent, expectedTarget, txsA, Id, HashPower, token);
+            var blockA = MineBlock(parent, expectedTarget, rules, txsA, Id, HashPower, token);
             if (blockA == null)
             {
                 foreach (var tx in pending) _mempool.Enqueue(tx);
@@ -407,7 +412,7 @@ namespace BitcoinNetworkSimulator
             }
             blockA.Signature = Sign(blockA.Hash);
 
-            var blockB = MineBlock(parent, expectedTarget, txsB, Id, HashPower, token);
+            var blockB = MineBlock(parent, expectedTarget, rules, txsB, Id, HashPower, token);
             if (blockB == null)
             {
                 // Only the first attempt won within its HashPower budget — don't

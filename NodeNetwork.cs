@@ -268,11 +268,17 @@ namespace BitcoinNetworkSimulator
             // (which reads/mutates them while mining) — see the comments atop
             // Node.cs and Miner.cs for why SoloMiner takes these directly
             // instead of holding a reference back to the Node it mines for.
-            var chain = new Blockchain();
+            // ruleSchedule is likewise shared between the two: Blockchain
+            // uses it to validate incoming blocks against what THIS node
+            // currently expects at a given height, and SoloMiner uses the
+            // exact same lookup to decide what to build under — see
+            // RuleSchedule's own comment in Blockchain.cs.
+            var ruleSchedule = new RuleSchedule(metadata.RuleSchedule);
+            var chain = new Blockchain(ruleSchedule);
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
             Func<List<string>> getPeerIds = () => PeerIdsFor(id);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.Rules, chain, mempool, getPeerIds, watcher, signingKey);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, _port, getPeerIds);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);

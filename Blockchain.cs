@@ -50,11 +50,19 @@ namespace BitcoinNetworkSimulator
         public string Target { get; set; } = "";
         public long Nonce { get; set; }
 
-        // The consensus/economics ruleset this block's builder claims to have
-        // followed — see ConsensusRules' own comment for the full picture.
-        // Part of the hashed payload below, same as Target/Nonce, so
-        // declaring one ruleset and then validating against another isn't
-        // possible without also breaking the hash.
+        // The consensus/economics ruleset this block's builder recorded
+        // using — see ConsensusRules' own comment for the full picture.
+        // INFORMATIONAL ONLY, not authoritative: a peer validating this
+        // block does NOT trust this field — it independently looks up its
+        // OWN RuleSchedule for this block's height and checks Target/reward
+        // against that instead (see ValidateChain's `rulesForHeight`
+        // parameter). This is here for introspection/logging/persistence
+        // (so a researcher — or ChainWatcher.ValidateSnapshot's neutral,
+        // no-node-context audit — can see what a builder believed it was
+        // following), and is still part of the hashed payload below so it
+        // can't be silently rewritten after the fact, but two nodes with
+        // matching RuleSchedules stay in consensus regardless of what this
+        // field says.
         public ConsensusRules Rules { get; set; } = new();
 
         public string ComputeHash()
@@ -189,22 +197,22 @@ namespace BitcoinNetworkSimulator
     }
 
     // ------------------------------------------------------------------
-    // A block's own declared consensus/economics ruleset — see "Scenarios"
-    // in README.md's NodeGroup.Rules and "What this is not" for the full
-    // picture. Every block carries one (Block.Rules, included in
-    // ComputeHash's payload so tampering with it after mining breaks the
-    // hash): a mining node stamps ITS OWN configured rules (from its
-    // NodeMetadata.Rules, itself sourced from whichever ScenarioNodeGroup
-    // created it) onto every block it builds, and ValidateChain checks a
-    // block purely against the rules IT declares for itself — not some
-    // single network-wide value every node is forced to share. That means
-    // "consensus" here is really "self-consistency": a block is valid if its
-    // target/reward are exactly what its OWN declared rules say they should
-    // be, regardless of what any other node's rules are. Genesis is the one
-    // exception — it's a fixed, universal checkpoint every node hardcodes
-    // identically (see CreateGenesisBlock), so it always uses a plain
-    // `new ConsensusRules()` (i.e. these defaults) regardless of which
-    // NodeGroup created the node holding it.
+    // One consensus/economics ruleset — see "Scenarios" in README.md's
+    // NodeGroup.RuleSchedule and "What this is not" for the full picture.
+    // Every node owns a RuleSchedule (below), not a single fixed
+    // ConsensusRules: which one is "currently active" can change at a
+    // given block height, e.g. real-bitcoin rules for heights 0-5, then a
+    // different named ruleset from height 6 on. A mining node looks up its
+    // OWN schedule for the height it's building and uses that to compute
+    // the block's target/reward; a validating node does the SAME lookup
+    // against ITS OWN schedule when checking an incoming block — see
+    // ValidateChain's `rulesForHeight` parameter. "Consensus" is exactly
+    // that: nodes whose schedules agree at a given height independently
+    // arrive at the same expected target/reward and stay on the same
+    // chain; nodes whose schedules disagree at a height (one switches,
+    // another doesn't, or they switch to different rulesets) independently
+    // arrive at DIFFERENT expected values and diverge — a real,
+    // simulated hard fork, not a bug.
     // ------------------------------------------------------------------
     public class ConsensusRules
     {
@@ -216,6 +224,50 @@ namespace BitcoinNetworkSimulator
         public decimal InitialBlockReward { get; set; } = Economics.DefaultInitialBlockReward;
         public int HalvingIntervalBlocks { get; set; } = Economics.DefaultHalvingIntervalBlocks;
         public decimal MaxSupply { get; set; } = Economics.DefaultMaxSupply;
+    }
+
+    // One entry in a node's RuleSchedule: `Rules` becomes the active
+    // ruleset starting at height `FromHeight`, until (if ever) a
+    // later-FromHeight entry supersedes it.
+    public class RuleScheduleEntry
+    {
+        public int FromHeight { get; set; } = 0;
+        public ConsensusRules Rules { get; set; } = new();
+    }
+
+    // ------------------------------------------------------------------
+    // A node's own timeline of which ConsensusRules is active at which
+    // height — see ConsensusRules' own comment for why this, not a single
+    // fixed ruleset, is what each node actually owns. Sourced from
+    // NodeMetadata.RuleSchedule (itself resolved from whichever
+    // ScenarioNodeGroup created the node — see ScenarioNodeGroup.RuleSchedule
+    // in Scenario.cs), and shared by both this node's Blockchain (for
+    // validating incoming blocks) and its SoloMiner (for building its own).
+    // ------------------------------------------------------------------
+    public class RuleSchedule
+    {
+        private readonly List<RuleScheduleEntry> _entries;
+
+        public RuleSchedule(IEnumerable<RuleScheduleEntry> entries)
+        {
+            _entries = entries.OrderBy(e => e.FromHeight).ToList();
+        }
+
+        // The ruleset active at `height`: the entry with the highest
+        // FromHeight that is still <= height. An empty schedule, or a
+        // height before every entry's FromHeight, resolves to
+        // `new ConsensusRules()` (real Bitcoin's own numbers) — the same
+        // fallback a NodeGroup with no RuleSchedule/RulesName at all gets.
+        public ConsensusRules RulesForHeight(int height)
+        {
+            var active = new ConsensusRules();
+            foreach (var entry in _entries)
+            {
+                if (entry.FromHeight > height) break;
+                active = entry.Rules;
+            }
+            return active;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -322,14 +374,22 @@ namespace BitcoinNetworkSimulator
 
     // Thread-safe append-only chain. Each "node" below keeps its OWN copy of
     // a Blockchain to simulate a real distributed system where nodes can
-    // (and, in this naive design, do) disagree.
+    // (and, in this naive design, do) disagree — including, now, about
+    // WHAT COUNTS as valid: `_ruleSchedule` is this node's own timeline of
+    // active ConsensusRules (see RuleSchedule's comment), consulted by
+    // every real peer-consensus check below (TryAppend,
+    // TryReplaceWithLongerChain, TryLoadFrom) so a block is only ever
+    // accepted here if it matches what THIS node currently expects at that
+    // height.
     public class Blockchain
     {
         private readonly object _lock = new();
+        private readonly RuleSchedule _ruleSchedule;
         public List<Block> Blocks { get; private set; } = new();
 
-        public Blockchain()
+        public Blockchain(RuleSchedule? ruleSchedule = null)
         {
+            _ruleSchedule = ruleSchedule ?? new RuleSchedule(Enumerable.Empty<RuleScheduleEntry>());
             Blocks.Add(CreateGenesisBlock());
         }
 
@@ -402,7 +462,19 @@ namespace BitcoinNetworkSimulator
         //     blocks" note in README.md
         // Being selected to build a block genuinely costs something real:
         // computational search work.
-        private static (bool Ok, string Reason) ValidateChain(List<Block> candidate)
+        //
+        // `rulesForHeight` decides which ConsensusRules each block's
+        // target/reward gets checked against — this is what makes "consensus"
+        // actually mean something (see ConsensusRules' comment): the three
+        // real peer-to-peer callers (TryAppend, TryReplaceWithLongerChain,
+        // TryLoadFrom) pass `this` node's OWN RuleSchedule.RulesForHeight, so
+        // a block is only accepted if it matches what the VALIDATING node
+        // itself currently expects at that height — not whatever the block's
+        // own Rules field happens to claim. ValidateSnapshot (the neutral,
+        // no-node-context watcher audit) is the one exception, passing each
+        // block's own self-declared Rules instead, since it has no "own"
+        // schedule to check against.
+        private static (bool Ok, string Reason) ValidateChain(List<Block> candidate, Func<int, ConsensusRules> rulesForHeight)
         {
             if (candidate == null || candidate.Count == 0)
                 return (false, "candidate chain is empty");
@@ -439,16 +511,17 @@ namespace BitcoinNetworkSimulator
 
                     var ancestors = candidate.GetRange(0, i); // blocks 0..i-1, i.e. up through parent
 
-                    // Every check below validates block against ITS OWN
-                    // declared Rules, not some network-wide value — see
-                    // ConsensusRules' comment. A block is valid if it
-                    // correctly followed the rules it claims to follow,
-                    // whatever those happen to be.
-                    var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, block.Rules);
+                    // Every check below validates block against the rules
+                    // ACTIVE FOR THE VALIDATOR at this height (rulesForHeight),
+                    // not whatever the block itself claims — see
+                    // ConsensusRules' comment and ValidateChain's own comment
+                    // above for why.
+                    var rules = rulesForHeight(block.Index);
+                    var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
                     if (block.Target != expectedTarget)
                         return (false, $"block #{block.Index} declares an incorrect target — expected {expectedTarget[..8]}..., " +
                             $"got {(block.Target.Length >= 8 ? block.Target[..8] : block.Target)}... " +
-                            "(target must match what this block's own declared Rules compute from prior block timestamps)");
+                            "(target must match what the validator's own currently-active rules compute from prior block timestamps)");
 
                     if (!ProofOfWork.MeetsTarget(block.Hash, block.Target))
                         return (false, $"block #{block.Index} hash does not satisfy its declared target — not a valid proof of work");
@@ -463,7 +536,7 @@ namespace BitcoinNetworkSimulator
                     if (coinbaseTxs.Count > 1)
                         return (false, $"block #{block.Index} contains {coinbaseTxs.Count} coinbase transactions — only one is allowed per block");
 
-                    var expectedReward = Economics.ComputeBlockReward(ancestors, block.Index, block.Rules);
+                    var expectedReward = Economics.ComputeBlockReward(ancestors, block.Index, rules);
                     if (expectedReward > 0m)
                     {
                         if (coinbaseTxs.Count != 1)
@@ -473,7 +546,7 @@ namespace BitcoinNetworkSimulator
                     }
                     else if (coinbaseTxs.Count != 0)
                     {
-                        return (false, $"block #{block.Index} includes a coinbase transaction, but the reward at this height has decayed to zero or its own declared {block.Rules.MaxSupply}-coin max supply has already been reached");
+                        return (false, $"block #{block.Index} includes a coinbase transaction, but the reward at this height has decayed to zero or the validator's own currently-active {rules.MaxSupply}-coin max supply has already been reached");
                     }
                 }
 
@@ -509,9 +582,13 @@ namespace BitcoinNetworkSimulator
             return (true, "ok");
         }
 
+        // Neutral, no-node-context structural audit (see ChainWatcher) — has
+        // no "own" RuleSchedule to check against, so it validates each block
+        // against its own self-declared Rules instead (self-consistency,
+        // not real peer consensus — see ValidateChain's own comment).
         public static (bool Ok, string Reason) ValidateSnapshot(List<Block> candidate)
         {
-            return ValidateChain(candidate);
+            return ValidateChain(candidate, height => candidate[height].Rules);
         }
 
         public (bool Ok, string Reason) TryAppend(Block block)
@@ -527,7 +604,7 @@ namespace BitcoinNetworkSimulator
                     return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}");
 
                 var candidate = new List<Block>(Blocks) { block };
-                var validation = ValidateChain(candidate);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
                 if (!validation.Ok)
                     return validation;
 
@@ -545,7 +622,7 @@ namespace BitcoinNetworkSimulator
         {
             lock (_lock)
             {
-                var validation = ValidateChain(candidate);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
                 if (!validation.Ok)
                     return (false, $"candidate rejected: {validation.Reason}");
 
@@ -568,7 +645,7 @@ namespace BitcoinNetworkSimulator
         {
             lock (_lock)
             {
-                var validation = ValidateChain(candidate);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
                 if (!validation.Ok)
                     return (false, $"saved chain failed validation: {validation.Reason}");
 

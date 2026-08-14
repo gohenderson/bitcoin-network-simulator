@@ -18,17 +18,17 @@ behaviors — not to be a secure or production-grade implementation. See
 
 ## How it works
 
-- **Proof-of-work.** Every block header carries a public 256-bit `Target`,
-  plus the `Rules` (retarget cadence, halving schedule, max supply, ...) its
-  builder used to compute it — see [Scenarios](#scenarios)' per-NodeGroup
-  `Rules` and [What this is not](#what-this-is-not). Any peer can verify a
-  block's hash independently by recomputing the expected target from prior
-  block timestamps AND that block's own declared `Rules`
-  (`ProofOfWork.ComputeExpectedTargetHex`), then checking the hash satisfies
-  it. Difficulty retargets every 2016 blocks to a 10-minute-per-block goal,
-  clamped to a 4x swing per retarget, by default — real Bitcoin's own
-  numbers. The starting difficulty itself is *not* real Bitcoin's — see
-  [What this is not](#what-this-is-not).
+- **Proof-of-work.** Every block header carries a public 256-bit `Target`.
+  Any peer can verify a block's hash independently by recomputing the
+  expected target from prior block timestamps, using **its own**
+  currently-active `ConsensusRules` for that height — not whatever the
+  block itself claims (`ProofOfWork.ComputeExpectedTargetHex`; see [What
+  this is not](#what-this-is-not) and [Scenarios](#scenarios)'
+  `RuleSchedule`) — then checking the hash satisfies it. Difficulty
+  retargets every 2016 blocks to a 10-minute-per-block goal, clamped to a
+  4x swing per retarget, by default — real Bitcoin's own numbers. The
+  starting difficulty itself is *not* real Bitcoin's — see [What this is
+  not](#what-this-is-not).
 - **Mining.** Mining is round-robin: one node gets a turn, then the next, and
   so on, so there's exactly one CPU-bound mining attempt happening at a
   time and no per-node background threads. A turn is bounded — a node tries
@@ -61,9 +61,10 @@ behaviors — not to be a secure or production-grade implementation. See
   the total ever minted hard-capped at 21,000,000 — real Bitcoin's own
   numbers, and at these defaults the halving schedule's asymptotic supply
   actually converges to the cap, not just in theory. Every peer recomputes
-  the expected reward for any block independently — using that block's own
-  declared `Rules`, not a value the whole network is forced to share (see
-  [Scenarios](#scenarios)) — and rejects a mismatch.
+  the expected reward for any block independently, using **its own**
+  currently-active rules for that height (see [Scenarios](#scenarios)'
+  `RuleSchedule`) — not a value the block itself claims — and rejects a
+  mismatch.
 - **Balances & double-spends.** Every account's balance is derived purely
   from chain history (`Ledger.ComputeBalances`). A block containing a
   transaction that spends more than the sender's balance at that exact
@@ -166,13 +167,17 @@ Phases:
 
 `NodeRules` is a named library of consensus/economics rulesets (retarget
 cadence, halving schedule, max supply, ...) that `NodeGroups` entries point
-to by name via `RulesName`, instead of every group that happens to share
-one repeating the same block. Omitted, a group's `RulesName` defaults to
-real Bitcoin's own numbers (see [Per-NodeGroup fields](#scenarios) below);
-pointed at different named rules, different groups can genuinely follow
-*different* rules within the same network, since every block carries its
-own builder's rules with it rather than everyone being forced to share one
-value:
+to by name — via `RulesName` (one ruleset for a group's whole life) or
+`RuleSchedule` (a timeline of named rulesets switching in at specific
+heights) — instead of every group that happens to share one repeating the
+same block. Omitted, a group defaults to real Bitcoin's own numbers for its
+whole life (see [Per-NodeGroup fields](#scenarios) below). **Every node
+validates an incoming block against ITS OWN currently-active rules for that
+height, not whatever the block claims** (see [What this is
+not](#what-this-is-not)) — so groups pointed at the same named rules, or
+whose schedules switch at the same height, stay in consensus with each
+other; groups whose schedules disagree at a height genuinely diverge, a
+simulated fork:
 
 ```yaml
 NodeRules:
@@ -191,6 +196,52 @@ Phases:
       - { Count: 5, Role: Honest, HashPower: 10, Pool: conservative, RulesName: conservative }
       - { Count: 5, Role: Honest, HashPower: 10, Pool: aggressive, RulesName: aggressive }
 ```
+
+A `NodeGroups` entry can also switch rules partway through its life, via
+`RuleSchedule` instead of `RulesName` — the multi-era case:
+
+```yaml
+NodeRules:
+  - Name: real-bitcoin
+    HalvingIntervalBlocks: 210000
+  - Name: bitcoin-cash
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    RetargetIntervalBlocks: 1  # simplified difficulty-adjustment-per-block
+
+Phases:
+  - Description: >-
+      This group mines under real-bitcoin rules through height 5, then switches to
+      bitcoin-cash rules from height 6 on. Point another group at the SAME schedule
+      (same NodeRules, same FromHeight) to keep it in consensus with this one;
+      a group that doesn't switch — or switches to something else — forks off instead.
+    DurationSeconds: 300
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 5
+        Role: Honest
+        HashPower: 10
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: real-bitcoin }
+          - { FromHeight: 6, RulesName: bitcoin-cash }
+```
+
+See [`Scenarios/consensus-rule-switch.yaml`](Scenarios/consensus-rule-switch.yaml)
+for this worked as a full, runnable scenario (two groups, one switches and
+one doesn't, producing a real fork), and
+[`Scenarios/mining-pool-fairness.yaml`](Scenarios/mining-pool-fairness.yaml)
+for the synchronized case (both groups switch together and stay in
+consensus).
+
+**Caution for `AutoGrowth: true` scenarios:** a node organic growth adds was
+never authored by any `NodeGroups` entry, so it always gets an empty
+`RuleSchedule` (real Bitcoin's own numbers, for its whole life — see
+[Per-NodeGroup fields](#scenarios) below). If a `NodeGroups` entry's own
+schedule later switches to something else, it forks away from every
+organically-grown node the moment it switches — almost certainly not what
+you want in a growth demo. Give a `RuleSchedule` that switches only to
+scenarios with `AutoGrowth: false` (a fixed, fully `NodeGroups`-authored
+population), unless the fork itself is the point.
 
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
@@ -278,16 +329,19 @@ Per-NodeGroup fields:
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
-- `RulesName` — name of an entry in the scenario file's top-level `NodeRules` list (below); the consensus/economics ruleset this group's nodes build blocks under. Omitted (or a name not defined in `NodeRules`, logged as a warning) means every field below defaults.
+- `RulesName` — shorthand for a single-entry `RuleSchedule` (`{ FromHeight: 0, RulesName }`): this group's consensus/economics ruleset for its whole life, by name from the scenario file's top-level `NodeRules` list (below). Omitted (or a name not defined in `NodeRules`, logged as a warning) means every field below defaults. Ignored (with a warning) if `RuleSchedule` is also set.
+- `RuleSchedule` — this group's full timeline of which named ruleset (from `NodeRules`) is active at which block height, as a list of `{ FromHeight, RulesName }` entries — e.g. `real-bitcoin` from height 0, switching to a different named ruleset from height 6 on. Takes precedence over `RulesName` if both are set.
 
 `NodeRules` — a top-level list of named rulesets, each `{ Name, ...the 8
-fields below }`. **Unlike every field above, these live on the block
-itself**, not just the node: a mining node stamps its own `RulesName`'s
-resolved fields onto every block it builds, and any peer validates that
-block purely against the rules it declares for itself, not some single
-value every node is forced to share (see [What this is
-not](#what-this-is-not)). All default to real Bitcoin's own numbers except
-`InitialDifficultyShift`, which deliberately can't be:
+fields below }`. **Every node validates an incoming block against ITS OWN
+`RuleSchedule` for that block's height, never against whatever the block
+itself claims** (`Block.Rules` is recorded for logging/introspection only —
+see [What this is not](#what-this-is-not)). So two `NodeGroups` stay in
+consensus with each other exactly when their resolved schedules agree at a
+given height (same named ruleset, switching at the same `FromHeight`);
+otherwise they diverge, same as a real hard fork. All default to real
+Bitcoin's own numbers except `InitialDifficultyShift`, which deliberately
+can't be:
 
 - `Name` — how a `NodeGroups` entry's `RulesName` refers to this entry. Keep unique — a duplicate `Name` is a scenario-authoring mistake (the last one silently wins).
 - `RetargetIntervalBlocks` / `TargetSecondsPerBlock` — how often (in blocks) difficulty retargets, and how long a block "should" take on average. Default `2016` / `600` (10 minutes).
@@ -302,11 +356,12 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 |---|---|
 | `quick-demo.yaml` | A fast sanity check — a handful of modest miners, short duration. |
 | `hash-power-disparity.yaml` | Nodes with very different simulated hash power competing for blocks. |
-| `mining-pool-fairness.yaml` | A shared pool competing against solo miners, and proportional reward splitting. |
+| `mining-pool-fairness.yaml` | A shared pool competing against solo miners, proportional reward splitting, and a synchronized `RuleSchedule` switch partway through (both groups switch together, stay in consensus). |
 | `wallet-only-network.yaml` | Mining-disabled, wallet-only nodes participating normally otherwise. |
 | `malicious-roles-showcase.yaml` | Each malicious node role in action (see below) and how honest nodes catch it. |
 | `large-scale-organic-growth.yaml` | A larger network growing over time. |
 | `economic-hub-topology.yaml` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
+| `consensus-rule-switch.yaml` | Two groups start under the same rules; one switches to a different named `RuleSchedule` entry partway through and the other doesn't — a real, simulated hard fork. |
 
 ## Node roles
 
@@ -337,20 +392,25 @@ ScenarioResults/<timestamp>-<scenario name, or "no-scenario">/
 On startup, a node resumes from its saved `blockchain.db` if it's
 structurally valid and shares this build's genesis; otherwise it starts fresh.
 `metadata.json` is loaded if present (so a hand-edited `HashPower`, `NodeRole`,
-`CanMine`, `Pool`, or `Rules` value survives a restart) and is safe to
-hand-edit — a changed `Rules` only ever affects blocks this node mines from
-that point on, never existing history (each already-mined block keeps
-whatever `Rules` got stamped onto it at the time, persisted right alongside
-it — see the `blocks` table below) — except `SigningKey`, which must never
-change once a node has mined blocks, or its historical blocks can no longer
-be verified.
+`CanMine`, `Pool`, or `RuleSchedule` value survives a restart) and is safe to
+hand-edit — a changed `RuleSchedule` only ever affects what this node
+builds AND validates from the moment it's loaded on, never existing
+history: each already-mined block keeps whatever it recorded in its own
+`Rules` at the time (informational only — see [What this is
+not](#what-this-is-not) — persisted right alongside it, see the `blocks`
+table below), and `TryLoadFrom`'s resume-time validation checks the
+resumed chain against the *freshly-loaded* `RuleSchedule`, so a resumed
+chain that was built under the old schedule but no longer matches the
+new one fails to load — except `SigningKey`, which must never change once
+a node has mined blocks, or its historical blocks can no longer be
+verified.
 
 Each node's `blockchain.db` (`BlockchainStore`, in `Blockchain.cs`) holds its
 local chain across two tables:
 
 | Table | Contents |
 |---|---|
-| `blocks` | One row per block, keyed by height (`idx`): timestamp, previous/own hash, builder, signature, target, nonce, and that block's own declared `Rules` (retarget cadence, halving schedule, max supply, ...) — see [Scenarios](#scenarios). |
+| `blocks` | One row per block, keyed by height (`idx`): timestamp, previous/own hash, builder, signature, target, nonce, and that block's own recorded (informational-only) `Rules` (retarget cadence, halving schedule, max supply, ...) — see [Scenarios](#scenarios) and [What this is not](#what-this-is-not). |
 | `transactions` | One row per transaction, foreign-keyed to `blocks`, with a `position` column preserving in-block order. |
 
 `PersistenceLoop.RunAsync` syncs each node's in-memory chain to its database
@@ -390,7 +450,7 @@ reconstructing reports or charting a run's progression over time.
 | `MiningScheduler.cs` | Round-robin turn scheduling across whatever `IMiner`s currently exist — solo or pooled, reshuffled whenever a new block appears. |
 | `TransactionGenerator.cs` | Synthetic transaction traffic: picks a real sender/recipient pair from live balances each round and submits a transaction. |
 | `PersistenceLoop.cs` | Per-node persistence: resumes a node's chain from its `blockchain.db` at startup, then periodically syncs it back for the rest of the run. |
-| `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ConsensusRules` (a block's own declared proof-of-work/economics ruleset), `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
+| `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ConsensusRules` (one proof-of-work/economics ruleset), `RuleSchedule` (a node's own timeline of which `ConsensusRules` is active at which height — what `ValidateChain` actually checks incoming blocks against), `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
 | `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
 | `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc., including relaying an accepted block/chain on to this node's own other peers. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, economic weight, consensus rules, signing key — and its `metadata.json` load/save/apply logic). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
@@ -414,21 +474,23 @@ reconstructing reports or charting a run's progression over time.
 - Node identity (`NodeIdentityRegistry`) is bootstrapped in-memory, standing
   in for whatever a real network would use (a genesis validator list, an
   on-chain registration transaction, a PKI).
-- **"Consensus" here really means self-consistency, not network-wide
-  agreement.** Every block carries its own builder's rules (retarget
-  cadence, halving schedule, max supply, ...) — see `ConsensusRules` in
-  `Blockchain.cs` and [Scenarios](#scenarios)' `NodeRules`/`RulesName` — and
-  `ValidateChain` checks a block purely against what IT declares for
-  itself. That means a node genuinely can build valid-by-its-own-rules
-  blocks under an arbitrary policy (a tiny halving interval, an enormous
-  max supply, ...) and the rest of the network will accept them, since
-  there's no single value everyone is independently checking a claim
-  against — the check is "did this block follow the rules it says it
-  followed," not "did this block follow *the* rules." Real Bitcoin has
-  exactly one, protocol-wide ruleset for precisely this reason: modeling
-  what happens when that assumption is relaxed (rule-divergent miners,
-  competing economic policies within one gossip network) is the point here,
-  not an oversight.
+- **Each node owns its own consensus-rules timeline, and a real fork is
+  possible if timelines disagree.** Every node has a `RuleSchedule` — which
+  `ConsensusRules` (retarget cadence, halving schedule, max supply, ...) is
+  active at which block height — see `RuleSchedule` in `Blockchain.cs` and
+  [Scenarios](#scenarios)' `RuleSchedule`/`RulesName`. When a node validates
+  an incoming block, it looks up **its own** schedule for that block's
+  height and checks the block's target/reward against that — never against
+  whatever the block itself claims (`Block.Rules` is recorded for
+  informational/logging purposes only; peers don't trust it). So consensus
+  here means what it means in real Bitcoin: nodes whose schedules agree at
+  a given height independently arrive at the same expected target/reward
+  and stay on one chain; nodes whose schedules disagree at a height (one
+  switches rulesets and the other doesn't, or they switch to different
+  ones) independently arrive at different expected values and reject each
+  other's blocks from that point on — a real, simulated hard fork. That
+  divergence, not a single node getting to declare its own arbitrary rules
+  and have everyone accept them, is what a `RuleSchedule` is for modeling.
 - A node's outbound peers are chosen once, at creation, and never rotate or
   get evicted for the rest of the run — real Bitcoin periodically refreshes
   connections. There's also no cap on inbound connections (real Bitcoin

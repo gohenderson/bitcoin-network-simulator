@@ -10,13 +10,28 @@ NodeRules:
     InitialBlockReward: 50
     HalvingIntervalBlocks: 210000
     MaxSupply: 21000000
+  # A much faster halving schedule than real-bitcoin's, so the switch below
+  # is actually observable within this scenario's duration.
+  - Name: accelerated
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 5
+    MaxSupply: 21000000
 
 Phases:
   - Description: >-
       15 nodes, fixed: 10 plain solo miners plus a 5-member pool ('cooperative') at HashPower
-      50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity
-      instead of five separate weaker shots, and splits its reward proportionally among
-      members.
+      50 each. Demonstrates MINING POOLS (the pool mines as one combined 250-strong entity
+      instead of five separate weaker shots, splitting its reward proportionally among
+      members) AND RuleSchedule: both groups switch, in sync, from real-bitcoin's
+      210,000-block halving to a 5-block halving at height 5, so the pool's per-member split
+      visibly shrinks as the reward halves every 5 blocks from then on. Both groups share the
+      exact same schedule, so they stay in consensus throughout — see
+      consensus-rule-switch.yaml for what happens when two groups' schedules DON'T match.
     DurationSeconds: 900
     AutoGrowth: false
     NodeGroups:
@@ -24,10 +39,14 @@ Phases:
       Role: Honest
       HashPower: 1
       CanMine: true
-      RulesName: real-bitcoin
+      RuleSchedule:
+        - { FromHeight: 0, RulesName: real-bitcoin }
+        - { FromHeight: 5, RulesName: accelerated }
     - Count: 5
       Role: Honest
       HashPower: 50
       CanMine: true
       Pool: cooperative
-      RulesName: real-bitcoin
+      RuleSchedule:
+        - { FromHeight: 0, RulesName: real-bitcoin }
+        - { FromHeight: 5, RulesName: accelerated }

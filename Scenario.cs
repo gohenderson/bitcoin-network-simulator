@@ -179,33 +179,53 @@ namespace BitcoinNetworkSimulator
         // nodes proportionally more likely to be picked as another node's
         // outbound peer, turning them into structural hubs.
         public int EconomicWeight { get; set; } = 1;
-        // Name of an entry in the scenario file's top-level NodeRules list —
-        // the consensus/economics ruleset (retarget cadence, halving
-        // schedule, max supply, ...) this group's nodes build blocks under.
-        // See ConsensusRules' own comment in Blockchain.cs for why this
-        // lives per-group (and, ultimately, per-block) rather than as a
-        // single scenario-wide setting: each block carries its builder's
-        // rules with it, so different groups genuinely can follow different
-        // rules within the same run/network, and ValidateChain checks each
-        // block purely against what IT declares. Null/omitted means
-        // ConsensusRules' own field defaults (real Bitcoin's own numbers,
-        // except InitialDifficultyShift — see its comment in Blockchain.cs
-        // for why that one deliberately isn't). Referencing a name that
-        // isn't defined in NodeRules is a scenario-authoring mistake (logged
-        // as a warning by ScenarioLoader.LoadAsync, then treated the same as
-        // null).
+        // Shorthand for "this group follows one named ruleset for its whole
+        // life" — sugar for RuleSchedule below with a single
+        // { FromHeight: 0, RulesName } entry. Name of an entry in the
+        // scenario file's top-level NodeRules list. See ConsensusRules' own
+        // comment in Blockchain.cs for why this lives per-group (and,
+        // ultimately, per-node-schedule) rather than as a single
+        // scenario-wide setting. Null/omitted (and RuleSchedule also empty)
+        // means ConsensusRules' own field defaults (real Bitcoin's own
+        // numbers, except InitialDifficultyShift — see its comment in
+        // Blockchain.cs for why that one deliberately isn't). Referencing a
+        // name that isn't defined in NodeRules is a scenario-authoring
+        // mistake (logged as a warning by ScenarioLoader.LoadAsync, then
+        // treated the same as null). Ignored (with a warning) if
+        // RuleSchedule is also set — use one or the other, not both.
         public string? RulesName { get; set; } = null;
 
+        // This group's full timeline of which named ruleset is active at
+        // which block height — e.g. real-bitcoin from height 0, switching to
+        // a differently-named ruleset from height 6 on. See RuleSchedule's
+        // own comment in Blockchain.cs for what this means for consensus:
+        // another group (or another scenario file entirely) whose own
+        // schedule agrees at a given height stays in sync with this one;
+        // one that doesn't diverges — a real, simulated fork. Takes
+        // precedence over RulesName if both are set. Each entry's RulesName
+        // is resolved the same way RulesName above is.
+        public List<ScenarioRuleScheduleEntry> RuleSchedule { get; set; } = new();
+
         // Populated by ScenarioLoader.LoadAsync's resolution pass, from
-        // RulesName looked up against the scenario file's NodeRules list —
-        // never itself part of the YAML shape (deliberately not named
-        // "Rules": an old-style inline Rules block left over in a
+        // RulesName/RuleSchedule looked up against the scenario file's
+        // NodeRules list — never itself part of the YAML shape (deliberately
+        // not named "Rules" or "RuleSchedule": leftover fields from a
         // not-yet-migrated file would otherwise deserialize straight into a
-        // same-named property here, silently bypassing RulesName resolution
-        // entirely instead of just being dropped by IgnoreUnmatchedProperties
-        // like any other stale field). This is what NodeNetwork.AddNodeAsync
+        // same-named property here, silently bypassing resolution entirely
+        // instead of just being dropped by IgnoreUnmatchedProperties like
+        // any other stale field). This is what NodeNetwork.AddNodeAsync
         // actually reads.
-        public ConsensusRules ResolvedRules { get; set; } = new();
+        public List<RuleScheduleEntry> ResolvedRuleSchedule { get; set; } = new();
+    }
+
+    // One entry in a ScenarioNodeGroup.RuleSchedule — see
+    // RuleScheduleEntry (Blockchain.cs) for the resolved, name-free runtime
+    // equivalent this becomes after ScenarioLoader.LoadAsync's resolution
+    // pass.
+    public class ScenarioRuleScheduleEntry
+    {
+        public int FromHeight { get; set; } = 0;
+        public string? RulesName { get; set; } = null;
     }
 
     public static class ScenarioLoader
@@ -267,12 +287,12 @@ namespace BitcoinNetworkSimulator
 
         // Builds a Name -> ConsensusRules lookup from scenarioFile.NodeRules
         // (last one wins on a duplicate Name, logged), then resolves every
-        // phase's every NodeGroup.RulesName against it into ResolvedRules.
-        // A null RulesName or one that isn't defined in NodeRules both
-        // resolve to a plain `new ConsensusRules()` (real Bitcoin's own
-        // defaults) — the latter is a scenario-authoring mistake, so it's
-        // logged rather than silently treated the same as intentionally
-        // omitting a name.
+        // phase's every NodeGroup's RuleSchedule/RulesName against it into
+        // ResolvedRuleSchedule. RuleSchedule wins if both are set (logged).
+        // A RulesName that isn't defined in NodeRules is a scenario-authoring
+        // mistake, so it's logged rather than silently falling back; the
+        // fallback for that entry (or for a group with neither field set)
+        // is a plain `new ConsensusRules()` (real Bitcoin's own defaults).
         private static void ResolveNodeRules(string path, ScenarioFile scenarioFile)
         {
             var byName = new Dictionary<string, ConsensusRules>();
@@ -288,22 +308,33 @@ namespace BitcoinNetworkSimulator
                 byName[rules.Name] = rules;
             }
 
+            ConsensusRules ResolveOne(string? rulesName)
+            {
+                if (rulesName == null) return new ConsensusRules();
+                if (byName.TryGetValue(rulesName, out var rules)) return rules;
+                Console.WriteLine($"[scenario] {path} references RulesName '{rulesName}', which isn't defined in NodeRules; using defaults");
+                return new ConsensusRules();
+            }
+
             foreach (var phase in scenarioFile.Phases)
             {
                 foreach (var group in phase.NodeGroups)
                 {
-                    if (group.RulesName == null)
+                    if (group.RuleSchedule.Count > 0)
                     {
-                        group.ResolvedRules = new ConsensusRules();
-                    }
-                    else if (byName.TryGetValue(group.RulesName, out var rules))
-                    {
-                        group.ResolvedRules = rules;
+                        if (group.RulesName != null)
+                            Console.WriteLine($"[scenario] {path} has a NodeGroup with both RulesName and RuleSchedule set; RuleSchedule wins");
+
+                        group.ResolvedRuleSchedule = group.RuleSchedule
+                            .Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName) })
+                            .ToList();
                     }
                     else
                     {
-                        Console.WriteLine($"[scenario] {path} has a NodeGroup with RulesName '{group.RulesName}', which isn't defined in NodeRules; using defaults");
-                        group.ResolvedRules = new ConsensusRules();
+                        group.ResolvedRuleSchedule = new List<RuleScheduleEntry>
+                        {
+                            new RuleScheduleEntry { FromHeight = 0, Rules = ResolveOne(group.RulesName) }
+                        };
                     }
                 }
             }
