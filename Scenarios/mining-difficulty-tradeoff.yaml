@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: high-difficulty
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 10
+    InitialBlockReward: 100
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 100 }
+  - Name: low-difficulty
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 4
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 50 }
+
+Phases:
+  - Description: >-
+      Two ValueSeeking groups see the exact same public prices and rewards but reach
+      OPPOSITE conclusions, because RuleSchedule now weighs each candidate by this node's
+      own odds of actually winning a turn under it, not just its raw reward x price.
+      high-difficulty pays more nominally (100 x 100 = 10000) but is 64x harder to mine
+      (InitialDifficultyShift 10 vs 4) than low-difficulty (10 x 50 = 500). A low-HashPower
+      group (5) has almost no chance of ever winning high-difficulty's target, so its
+      EXPECTED value collapses (~49) well under low-difficulty's near-certain, if smaller,
+      payout (~138) — it mines low-difficulty. A high-HashPower group (500) clears
+      high-difficulty's target often enough that its expected value (~3865) beats
+      low-difficulty's capped-at-nominal payout (500) — it mines high-difficulty instead.
+      Same public data, same formula, opposite rational choices — and the two groups fork
+      away from each other from block 1 on (see the "Peer discouragement" note in
+      README.md).
+    DurationSeconds: 120
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 2
+        Role: Honest
+        HashPower: 500
+        ValueSeeking: true
+        ValueSeekingCandidates: [high-difficulty, low-difficulty]
+      - Count: 2
+        Role: Honest
+        HashPower: 5
+        ValueSeeking: true
+        ValueSeekingCandidates: [high-difficulty, low-difficulty]

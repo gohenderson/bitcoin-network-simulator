@@ -298,7 +298,7 @@ namespace BitcoinNetworkSimulator
             // either way: Blockchain (validation) and SoloMiner (building) both get
             // this one RuleSchedule object.
             var ruleSchedule = metadata.ValueSeekingCandidates.Count > 0
-                ? new RuleSchedule(metadata.ValueSeekingCandidates)
+                ? new RuleSchedule(metadata.ValueSeekingCandidates, metadata.HashPower)
                 : new RuleSchedule(metadata.RuleSchedule);
             var chain = new Blockchain(ruleSchedule);
             var mempool = new ConcurrentQueue<Transaction>();

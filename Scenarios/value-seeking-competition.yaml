@@ -30,8 +30,11 @@ NodeRules:
 Phases:
   - Description: >-
       4 ValueSeeking nodes compare real-bitcoin (reward 50) against bitcoin-cash (reward
-      10) purely by live profitability (NominalBlockReward x PriceSchedule): before height
-      8, real-bitcoin's 50 x 100 = 5000 beats bitcoin-cash's 10 x 20 = 200, so they build
+      10) by expected profitability (win probability x NominalBlockReward x PriceSchedule)
+      — both candidates share InitialDifficultyShift 8, so at HashPower 20 the win
+      probability (~7.5%) scales both sides equally and never changes who's ahead, only
+      the absolute numbers CostPerAttempt is compared against below. Before height 8,
+      real-bitcoin's 50 x 100 = 5000 beats bitcoin-cash's 10 x 20 = 200, so they build
       real-bitcoin blocks (watch for "reward 50" in the console). At height 8 the prices
       cross — real-bitcoin crashes to 5 (50 x 5 = 250) while bitcoin-cash pumps to 200
       (10 x 200 = 2000) — and every ValueSeeking node independently switches to
@@ -41,7 +44,7 @@ Phases:
       ValueSeeking group the moment it switches — see the "Peer discouragement" note in
       README.md for what that does to their connection. At height 16 both prices collapse
       — real-bitcoin 50 x 1 = 50 and bitcoin-cash 10 x 1 = 10 both fall under this group's
-      mining cost (CostPerAttempt 10 x HashPower 20 = 200 per turn) — so every ValueSeeking
+      mining cost (CostPerAttempt 2 x HashPower 20 = 40 per turn) — so every ValueSeeking
       node goes idle rather than mining at a loss, exactly like real hash power abandoning
       an unprofitable market instead of chasing a doomed reward.
     DurationSeconds: 300
@@ -50,7 +53,7 @@ Phases:
       - Count: 4
         Role: Honest
         HashPower: 20
-        CostPerAttempt: 10
+        CostPerAttempt: 2
         ValueSeeking: true
         ValueSeekingCandidates: [real-bitcoin, bitcoin-cash]
       - Count: 2

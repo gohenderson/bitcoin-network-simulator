@@ -194,6 +194,25 @@ namespace BitcoinNetworkSimulator
 
             return TargetToHex(scaled);
         }
+
+        // Probability of winning at least one of `hashPower` independent nonce
+        // attempts against a ruleset whose difficulty is `initialDifficultyShift`
+        // — per-attempt success probability at shift `s` is target/MaxTarget =
+        // (MaxTarget >> s)/MaxTarget ~= 2^-s (see ComputeExpectedTargetHex's
+        // ancestors==null branch; the truncation from MaxTarget's own -1 is
+        // negligible past 200+ bits of precision). Used by RuleSchedule's
+        // value-seeking mode to weigh a candidate's raw reward x price by how
+        // likely THIS node actually is to win it, not just what it pays if won —
+        // see "ValueSeeking" in README.md. Uses each candidate's PRE-RETARGET
+        // (genesis) difficulty as an ancestor-free proxy, the same simplification
+        // Economics.NominalBlockReward already makes for reward: a candidate
+        // ruleset the node isn't currently mining has no real retargeted chain
+        // history to derive an actual current target from.
+        public static double WinProbability(int hashPower, int initialDifficultyShift)
+        {
+            var perAttempt = Math.Pow(2.0, -initialDifficultyShift);
+            return 1.0 - Math.Pow(1.0 - perAttempt, hashPower);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -282,6 +301,7 @@ namespace BitcoinNetworkSimulator
     {
         private readonly List<RuleScheduleEntry> _entries; // static mode; empty in value-seeking mode
         private readonly List<ValueSeekingCandidate> _valueSeekingCandidates; // value-seeking mode; empty in static mode
+        private readonly int _hashPower; // value-seeking mode only; unused in static mode
 
         public RuleSchedule(IEnumerable<RuleScheduleEntry> entries)
         {
@@ -290,18 +310,22 @@ namespace BitcoinNetworkSimulator
         }
 
         // Value-seeking mode: instead of one author-scripted timeline, RulesForHeight
-        // dynamically picks whichever candidate is most profitable AT that height —
-        // NominalBlockReward(height, candidate.Rules) * price-at-height(candidate.PriceSchedule).
-        // Deliberately reward x PRICE only, no relative-hashrate/difficulty-cost factor:
-        // mining here is round-robin turn-allocated, so a miner's odds of winning ITS
-        // turn don't depend on which ruleset it mines under, only the payout does — see
-        // "ValueSeeking" in README.md. Public and deterministic (PriceSchedule and every
-        // candidate's Rules are scenario-authored, not per-node random state), so every
-        // value-seeking node independently arrives at the identical pick for a given
-        // height, the same way ProofOfWork/Economics' own recomputed-not-trusted values do.
-        public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates)
+        // dynamically picks whichever candidate has the highest EXPECTED value at that
+        // height — ProofOfWork.WinProbability(hashPower, candidate.Rules.InitialDifficultyShift)
+        // x NominalBlockReward(height, candidate.Rules) x price-at-height(candidate.PriceSchedule).
+        // Folding in win probability means a candidate that pays more nominally isn't
+        // automatically the best pick if it's also much harder to actually win — and
+        // since WinProbability depends on THIS node's own hashPower, two value-seeking
+        // nodes with different hash power can rationally reach OPPOSITE conclusions from
+        // the exact same public price/reward/difficulty data — see "ValueSeeking" in
+        // README.md. Still fully public and deterministic per node (nothing here is
+        // random or hidden), so any two nodes that share both a candidate set AND a
+        // hashPower still always agree, the same way ProofOfWork/Economics' own
+        // recomputed-not-trusted values do.
+        public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates, int hashPower)
         {
             _entries = new List<RuleScheduleEntry>();
+            _hashPower = hashPower;
             _valueSeekingCandidates = candidates
                 .Select(c => new ValueSeekingCandidate { Rules = c.Rules, PriceSchedule = c.PriceSchedule.OrderBy(p => p.FromHeight).ToList() })
                 .ToList();
@@ -326,7 +350,7 @@ namespace BitcoinNetworkSimulator
             return active;
         }
 
-        // The best candidate's raw expected value (NominalBlockReward x price) at
+        // The best candidate's expected value (win probability x reward x price) at
         // `height` — decimal.MaxValue in static mode, so a cost comparison against
         // it never triggers (a scripted/static schedule isn't a profitability
         // decision to begin with, so there's nothing for a mining cost to
@@ -335,11 +359,12 @@ namespace BitcoinNetworkSimulator
         public decimal BestValueAt(int height) =>
             _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Value : decimal.MaxValue;
 
-        // Picks whichever candidate's NominalBlockReward x price-at-height is
-        // highest; first-in-list wins an exact tie (deterministic, same list
-        // order on every node). Falls back to `new ConsensusRules()` — same
-        // fallback an empty static schedule gets — when every candidate is
-        // worth exactly $0 (e.g. no PriceSchedule entry has activated yet).
+        // Picks whichever candidate's expected value (win probability x
+        // NominalBlockReward x price-at-height) is highest; first-in-list wins an
+        // exact tie (deterministic, same list order on every node). Falls back to
+        // `new ConsensusRules()` — same fallback an empty static schedule gets —
+        // when every candidate is worth exactly $0 (e.g. no PriceSchedule entry
+        // has activated yet).
         private ConsensusRules MostProfitableAt(int height)
         {
             var (best, value) = BestCandidateAt(height);
@@ -355,7 +380,8 @@ namespace BitcoinNetworkSimulator
             foreach (var candidate in _valueSeekingCandidates)
             {
                 var price = PriceAt(candidate.PriceSchedule, height);
-                var value = Economics.NominalBlockReward(height, candidate.Rules) * price;
+                var winProbability = ProofOfWork.WinProbability(_hashPower, candidate.Rules.InitialDifficultyShift);
+                var value = (decimal)winProbability * Economics.NominalBlockReward(height, candidate.Rules) * price;
                 if (best == null || value > bestValue)
                 {
                     best = candidate.Rules;

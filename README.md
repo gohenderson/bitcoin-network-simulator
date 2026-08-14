@@ -316,19 +316,30 @@ discouragement" note above for what that does to their connection.
 `ValueSeeking` is a `NodeGroups` field that replaces a fixed
 `RulesName`/`RuleSchedule` with a live *computation*: instead of an author
 scripting which ruleset a group follows, each node in the group picks
-whichever of its `ValueSeekingCandidates` currently pays the most —
-`NominalBlockReward(height, rules) x Price(rules, height)` — recomputed
+whichever of its `ValueSeekingCandidates` has the highest EXPECTED value —
+`ProofOfWork.WinProbability(HashPower, rules.InitialDifficultyShift) x
+NominalBlockReward(height, rules) x Price(rules, height)` — recomputed
 fresh every time it mines. `Price` comes from each `NodeRules` entry's own
 `PriceSchedule` (the same `{ FromHeight, value }` shape as everything else
 here — see [`NodeRules`](#scenarios) below), a $-reference value over
 height, letting a scenario script a market event (a crash, a pump, a
-delisting) the same way it scripts a rule change. Because `PriceSchedule`
-and every candidate's `ConsensusRules` are public, scenario-authored facts
-— not private per-node randomness — every `ValueSeeking` node
-independently recomputes the identical answer at a given height, with no
-coordination needed, the same "recompute it yourself, don't trust a claim"
-property `ProofOfWork` and `Economics` already rely on elsewhere. For
-example:
+delisting) the same way it scripts a rule change. Weighing by win
+probability means a candidate that pays more nominally isn't automatically
+the best pick if it's also much harder to actually mine (see
+`InitialDifficultyShift` under [`NodeRules`](#scenarios) below) — and
+because that probability depends on *this node's own* `HashPower`, two
+`ValueSeeking` nodes with different hash power can rationally reach
+*opposite* conclusions from the exact same public data (see
+`Scenarios/mining-difficulty-tradeoff.yaml`). Determinism still holds *per
+node*: `PriceSchedule` and every candidate's `ConsensusRules` are public,
+scenario-authored facts — not private per-node randomness — so any two
+`ValueSeeking` nodes that share both a candidate set and a `HashPower`
+always independently recompute the identical answer at a given height, the
+same "recompute it yourself, don't trust a claim" property `ProofOfWork`
+and `Economics` already rely on elsewhere. For example (both rulesets here
+share the same, unstated — so default — `InitialDifficultyShift`, which
+cancels out of the comparison identically for both, leaving the raw
+`reward x price` numbers below untouched by win probability):
 
 ```yaml
 NodeRules:
@@ -362,22 +373,22 @@ only for now, not (yet) available to organically-grown nodes via
 `DefaultRuleSchedule`. See `Scenarios/value-seeking-competition.yaml` for
 this exact example running end to end.
 
-**Mining costs.** `ValueSeeking`'s profitability comparison assumes mining
-is free — real mining costs electricity and hardware. `CostPerAttempt` (a
-per-`NodeGroups` field, default `0`) puts a $ price on each nonce a node
-tries. Because the same hardware costs the same to run regardless of which
-candidate ruleset it's pointed at, this cost is identical across every
-candidate — so it never changes *which* one is most profitable, only
-*whether* mining is worth doing at all this turn: each turn, if the best
-candidate's value doesn't clear `CostPerAttempt x HashPower`, the node
-sits out entirely (`going idle` in the console) rather than mining at a
-guaranteed loss, and resumes (`resuming mining`) the moment a candidate
-clears the bar again — modeling real hash power abandoning an
-unprofitable market instead of chasing a doomed reward. Continuing the
-example above, adding `CostPerAttempt: 10` to a `HashPower: 20` group
-means anything below a value of `200` isn't worth mining — see
-`Scenarios/value-seeking-competition.yaml`'s third price stage, where both
-rulesets crash together and the group goes idle.
+**Mining costs.** `ValueSeeking`'s profitability comparison otherwise
+assumes mining is free — real mining costs electricity and hardware.
+`CostPerAttempt` (a per-`NodeGroups` field, default `0`) puts a $ price on
+each nonce a node tries. Because the same hardware costs the same to run
+regardless of which candidate ruleset it's pointed at, this cost is
+identical across every candidate — so it never changes *which* one is
+most profitable, only *whether* mining is worth doing at all this turn:
+each turn, if the best candidate's expected value doesn't clear
+`CostPerAttempt x HashPower`, the node sits out entirely (`going idle` in
+the console) rather than mining at a guaranteed loss, and resumes
+(`resuming mining`) the moment a candidate clears the bar again —
+modeling real hash power abandoning an unprofitable market instead of
+chasing a doomed reward. See `Scenarios/value-seeking-competition.yaml`'s
+third price stage, where both rulesets' expected value collapses under
+its `CostPerAttempt: 2` / `HashPower: 20` group (threshold `40`) and the
+group goes idle.
 
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
@@ -503,6 +514,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `economic-hub-topology.yaml` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
 | `consensus-rule-switch.yaml` | Two groups start under the same rules; one switches to a different named `RuleSchedule` entry partway through and the other doesn't — a real, simulated hard fork. |
 | `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. A third price crash then drops both rulesets below `CostPerAttempt`, and the group goes idle rather than mine at a loss. |
+| `mining-difficulty-tradeoff.yaml` | Two `ValueSeeking` groups with very different `HashPower` see the exact same prices and rewards but reach opposite conclusions, because expected value also weighs each candidate's `InitialDifficultyShift` — the low-`HashPower` group can't realistically win the harder, richer ruleset and mines the easier one instead. |
 
 ## Node roles
 
