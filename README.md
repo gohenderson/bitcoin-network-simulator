@@ -265,37 +265,53 @@ population), unless the fork itself is the point.
 `DefaultRuleSchedule` controls which rules organically-grown nodes follow —
 every node organic growth creates, plus the initial dynamic-start node, but
 never a `NodeGroups`-authored node (those always use their own
-`RulesName`/`RuleSchedule`). It has the same shape as a `NodeGroups`
-entry's `RuleSchedule` — a list of `{ FromHeight, RulesName }` entries — plus
-a `Percent` (0-100, not a 0-1 fraction) on each entry: the share of
-newly-created nodes at or after that height which should follow those
-rules, decided by random chance per node at creation time. Entries are
-resolved in reverse declaration order — the *last*-declared entry active at
-a height gets its full stated `Percent`, and every earlier entry active at
-that height is reduced by however much the later entries have already
-claimed. Any percentage nobody claims falls back to a node's hardcoded
-`ConsensusRules` defaults. For example:
+`RulesName`/`RuleSchedule`). It's a list of **tranches** — `{ FromHeight,
+RuleSchedules }` — each active for nodes created at or after `FromHeight`,
+replacing whichever earlier tranche was active outright (not blended with
+it) once the network reaches that height. A tranche's `RuleSchedules` is
+the *full* distribution new nodes are drawn from at that stage: an array of
+`{ Percent, RulesName }` options, where `Percent` (0-100, not a 0-1
+fraction) is the chance a new node gets that option's named ruleset as its
+own, single, lifelong `ConsensusRules`. A tranche's `Percent`s are summed
+in list order against a 100-point pool; whatever's left unclaimed falls
+back to a node's hardcoded `ConsensusRules` defaults. For example:
 
 ```yaml
 DefaultRuleSchedule:
-  - { FromHeight: 0, RulesName: bitcoin-cash, Percent: 50 }
+  - FromHeight: 0
+    RuleSchedules:
+      - Percent: 50
+        RulesName: bitcoin-cash
 ```
 
-— half of all organically-grown nodes get `bitcoin-cash`'s rules, the other
-half fall back to hardcoded defaults. Whereas:
+— half of all organically-grown nodes get `bitcoin-cash`'s rules for their
+whole life, the other half fall back to hardcoded defaults. A real network
+distribution that itself shifts as the network matures:
 
 ```yaml
 DefaultRuleSchedule:
-  - { FromHeight: 0, RulesName: real-bitcoin, Percent: 100 }
-  - { FromHeight: 0, RulesName: bitcoin-cash, Percent: 20 }
+  - FromHeight: 0
+    RuleSchedules:
+      - Percent: 80
+        RulesName: real-bitcoin
+      - Percent: 20
+        RulesName: bitcoin-cash
+  - FromHeight: 5000
+    RuleSchedules:
+      - Percent: 50
+        RulesName: real-bitcoin
+      - Percent: 50
+        RulesName: bitcoin-cash
 ```
 
-— the second (later-declared) entry claims its full 20% first, leaving the
-first entry with only 80%, not its stated 100% (`real-bitcoin` 80% /
-`bitcoin-cash` 20%, nothing left unclaimed). `FromHeight` gates entries the
-same way a `RuleSchedule`'s does — an entry with `FromHeight: 6` only
-applies to nodes created once the network's chain has reached height 6;
-nodes created earlier aren't retroactively reassigned.
+— up to height 5000, new nodes split 80/20 between `real-bitcoin` and
+`bitcoin-cash`; the second (higher-`FromHeight`) tranche then REPLACES that
+distribution outright for anything created from height 5000 on, evening
+the split to 50/50 — nodes already created under the first tranche keep
+whatever they were assigned, they aren't retroactively reassigned.
+`real-bitcoin` and `bitcoin-cash` nodes reject each other's blocks outright
+(a real, simulated fork) the moment their paths cross — see the "Peer
+discouragement" note above for what that does to their connection.
 
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the

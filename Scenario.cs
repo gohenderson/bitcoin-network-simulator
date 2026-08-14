@@ -29,9 +29,9 @@ namespace BitcoinNetworkSimulator
         // root because it describes one policy for "any node that just
         // shows up" for the run's whole duration, the same way NodeRules
         // does. See DefaultRuleSchedule's own doc comment for the exact
-        // percentage/priority semantics — it's not a simple "sum to 100%"
-        // list. Empty (the default) means every organically-grown node gets
-        // ConsensusRules' own defaults, same as today.
+        // distribution semantics. Empty (the default) means every
+        // organically-grown node gets ConsensusRules' own defaults, same as
+        // today.
         public List<ScenarioDefaultRuleScheduleEntry> DefaultRuleSchedule { get; set; } = new();
 
         // Populated by ScenarioLoader.LoadAsync's resolution pass, from
@@ -43,57 +43,54 @@ namespace BitcoinNetworkSimulator
     }
 
     // ------------------------------------------------------------------
-    // One entry in ScenarioFile.DefaultRuleSchedule — same {FromHeight,
-    // RulesName} shape as ScenarioRuleScheduleEntry, plus Percent: the
-    // chance (0-100, NOT a 0-1 fraction like GrowthMaliciousFraction and
-    // friends elsewhere in this file) that a brand-new organically-grown
-    // node gets assigned RulesName as its own, single, lifelong
-    // RuleSchedule, once the network's current chain height reaches
-    // FromHeight.
-    //
-    // THE PERCENTAGES ARE NOT INDEPENDENT — entries are allocated in
-    // REVERSE DECLARATION ORDER (last-listed first) against a shared
-    // 100-point pool, at whatever height a new node is actually being
-    // created: each entry (among those with FromHeight <= that height)
-    // claims min(its own Percent, however much pool is left), and
-    // whatever's left after every ACTIVE entry has taken its share falls
-    // back to ConsensusRules' own defaults. In effect, LATER-DECLARED
-    // entries are guaranteed their exact stated share (as long as the pool
-    // has room), and EARLIER-DECLARED entries absorb whatever's left,
-    // capped at their own declared Percent. Concretely:
-    //
-    //   - One entry alone, Percent: 50 — exactly 50% of new nodes get it;
-    //     the other 50% get hardcoded defaults (the pool has 50 left over).
-    //   - Two entries, first Percent: 100, second Percent: 20 (declared
-    //     after the first) — the SECOND gets its full 20% (declared later,
-    //     so it goes first against the pool: min(20, 100) = 20, pool now
-    //     80); the FIRST is left with only 80% (min(100, 80) = 80), not
-    //     its originally-stated 100 — "each new rule added to the schedule
-    //     adjusts the [effective] distribution by exactly that %."
-    //   - A later entry can fully displace an earlier one if the pool runs
-    //     out before reaching it — a signal the declared Percents add up
-    //     to more than is achievable; nothing crashes, but earlier entries
-    //     may end up with less than their stated share.
-    //
-    // FromHeight lets this distribution itself change as the network
-    // matures — e.g. every new node gets real-bitcoin rules until height
-    // 50, then a 30%-adopted upgraded ruleset enters the mix for anything
-    // created from height 50 on. See PickDefaultRuleScheduleEntry in
-    // NodeNetwork.cs for the implementation, and "Scenarios" in README.md
-    // for a fully worked example.
+    // One TRANCHE in ScenarioFile.DefaultRuleSchedule: from FromHeight on,
+    // RuleSchedules is the FULL distribution (a list of named-ruleset
+    // options, each with a Percent share) a brand-new organically-grown
+    // node's own single, lifelong ConsensusRules is drawn from. A later
+    // tranche (higher FromHeight) REPLACES the previous one outright once
+    // the network reaches it, rather than blending with it — so each
+    // tranche should stand on its own as a complete distribution for that
+    // stage of the network's growth (e.g. an 80/20 split up to height 5000,
+    // then a fresh 50/50 split for anything created after). Two tranches
+    // sharing a FromHeight is a scenario-authoring mistake (the last one
+    // silently wins, same as a duplicate NodeRules Name). See
+    // NodeNetwork.PickDefaultRuleSchedule for the implementation, and
+    // "Scenarios" in README.md for a fully worked example.
     // ------------------------------------------------------------------
     public class ScenarioDefaultRuleScheduleEntry
     {
         public int FromHeight { get; set; } = 0;
-        public string? RulesName { get; set; } = null;
+        public List<ScenarioDefaultRuleScheduleOption> RuleSchedules { get; set; } = new();
+    }
+
+    // One weighted option within a ScenarioDefaultRuleScheduleEntry tranche:
+    // Percent (0-100, NOT a 0-1 fraction like GrowthMaliciousFraction and
+    // friends elsewhere in this file) is the chance a brand-new
+    // organically-grown node gets RulesName as its own, single, lifelong
+    // ruleset, once its own tranche's FromHeight has been reached. A
+    // tranche's Percents are summed directly against a 100-point pool, in
+    // list order; whatever's left unclaimed falls back to a node's
+    // hardcoded ConsensusRules defaults. E.g. two options, Percent 80 and
+    // 20, split new nodes 80/20 between the two named rulesets; a single
+    // option at Percent 50 leaves the other 50% on hardcoded defaults.
+    public class ScenarioDefaultRuleScheduleOption
+    {
         public double Percent { get; set; } = 0;
+        public string? RulesName { get; set; } = null;
     }
 
     // The resolved, name-free runtime equivalent of
-    // ScenarioDefaultRuleScheduleEntry — see NodeNetwork.PickDefaultRuleScheduleEntry.
+    // ScenarioDefaultRuleScheduleEntry — see NodeNetwork.PickDefaultRuleSchedule.
     public class ResolvedDefaultRuleScheduleEntry
     {
         public int FromHeight { get; set; } = 0;
+        public List<ResolvedDefaultRuleScheduleOption> RuleSchedules { get; set; } = new();
+    }
+
+    // The resolved, name-free runtime equivalent of
+    // ScenarioDefaultRuleScheduleOption.
+    public class ResolvedDefaultRuleScheduleOption
+    {
         public double Percent { get; set; } = 0;
         public ConsensusRules Rules { get; set; } = new();
     }
@@ -393,6 +390,9 @@ namespace BitcoinNetworkSimulator
                 return new ConsensusRules();
             }
 
+            List<RuleScheduleEntry> ResolveSchedule(List<ScenarioRuleScheduleEntry> schedule) =>
+                schedule.Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName) }).ToList();
+
             foreach (var phase in scenarioFile.Phases)
             {
                 foreach (var group in phase.NodeGroups)
@@ -402,9 +402,7 @@ namespace BitcoinNetworkSimulator
                         if (group.RulesName != null)
                             Console.WriteLine($"[scenario] {path} has a NodeGroup with both RulesName and RuleSchedule set; RuleSchedule wins");
 
-                        group.ResolvedRuleSchedule = group.RuleSchedule
-                            .Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName) })
-                            .ToList();
+                        group.ResolvedRuleSchedule = ResolveSchedule(group.RuleSchedule);
                     }
                     else
                     {
@@ -420,8 +418,13 @@ namespace BitcoinNetworkSimulator
                 .Select(entry => new ResolvedDefaultRuleScheduleEntry
                 {
                     FromHeight = entry.FromHeight,
-                    Percent = Math.Max(0, entry.Percent),
-                    Rules = ResolveOne(entry.RulesName)
+                    RuleSchedules = entry.RuleSchedules
+                        .Select(option => new ResolvedDefaultRuleScheduleOption
+                        {
+                            Percent = Math.Max(0, option.Percent),
+                            Rules = ResolveOne(option.RulesName)
+                        })
+                        .ToList()
                 })
                 .ToList();
         }

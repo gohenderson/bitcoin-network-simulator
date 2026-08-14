@@ -115,10 +115,10 @@ namespace BitcoinNetworkSimulator
         private double _walletOnlyFraction;
         // What RuleSchedule a brand-new organically-grown node gets — see
         // ScenarioFile.DefaultRuleSchedule's own comment for the
-        // percentage/priority semantics and PickDefaultRuleScheduleEntry
-        // below for the implementation. Whole-run, not phase-mutable like
-        // the three fields above (ScenarioFile.DefaultRuleSchedule lives at
-        // the file root, not per-phase), so this one IS readonly.
+        // tranche/option semantics and PickDefaultRuleSchedule below for the
+        // implementation. Whole-run, not phase-mutable like the three
+        // fields above (ScenarioFile.DefaultRuleSchedule lives at the file
+        // root, not per-phase), so this one IS readonly.
         private readonly List<ResolvedDefaultRuleScheduleEntry> _defaultRuleSchedule;
         private readonly Random _rng = new();
         private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
@@ -371,51 +371,35 @@ namespace BitcoinNetworkSimulator
             return chosen;
         }
 
-        // Picks, for a brand-new organically-grown node, the ConsensusRules
-        // it should get (or null for hardcoded defaults) — see
+        // Picks, for a brand-new organically-grown node, the single-entry
+        // RuleSchedule it should get (or an empty list for hardcoded
+        // defaults — the same thing an empty schedule already means, see
+        // RuleSchedule.RulesForHeight in Blockchain.cs) — see
         // ScenarioFile.DefaultRuleSchedule's own comment in Scenario.cs for
-        // the full reverse-declaration-priority semantics this implements.
-        // `height` is the representative chain height AddNodeAsync
-        // snapshotted, gating which entries have activated yet.
-        private ConsensusRules? PickDefaultRuleScheduleEntry(int height)
+        // the tranche/option semantics this implements. `height` is the
+        // representative chain height AddNodeAsync snapshotted, gating
+        // which tranche has activated yet.
+        private List<RuleScheduleEntry> PickDefaultRuleSchedule(int height)
         {
-            var active = _defaultRuleSchedule.Where(e => e.FromHeight <= height).ToList();
-            if (active.Count == 0) return null;
-
-            // Reverse declaration order: the LAST-declared active entry
-            // gets first claim on the 100-point pool (guaranteeing its
-            // exact Percent, pool permitting), working back to the FIRST,
-            // which absorbs whatever's left, capped at its own Percent.
-            var pool = 100.0;
-            var shares = new List<(ConsensusRules Rules, double Share)>();
-            for (var i = active.Count - 1; i >= 0; i--)
-            {
-                var share = Math.Min(active[i].Percent, pool);
-                pool -= share;
-                if (share > 0) shares.Add((active[i].Rules, share));
-            }
+            // The latest-activated tranche wins outright — it isn't merged
+            // with any earlier tranche. Ties (two tranches sharing a
+            // FromHeight) resolve to the last-declared one, same as a
+            // duplicate NodeRules Name elsewhere.
+            var tranche = _defaultRuleSchedule
+                .Where(e => e.FromHeight <= height)
+                .OrderBy(e => e.FromHeight)
+                .LastOrDefault();
+            if (tranche == null || tranche.RuleSchedules.Count == 0) return new List<RuleScheduleEntry>();
 
             var roll = _defaultRuleScheduleRng.NextDouble() * 100.0;
             var cumulative = 0.0;
-            foreach (var (rules, share) in shares)
+            foreach (var option in tranche.RuleSchedules)
             {
-                cumulative += share;
-                if (roll < cumulative) return rules;
+                cumulative += option.Percent;
+                if (roll < cumulative)
+                    return new List<RuleScheduleEntry> { new RuleScheduleEntry { FromHeight = 0, Rules = option.Rules } };
             }
-            return null; // unclaimed remainder — hardcoded defaults
-        }
-
-        // Wraps PickDefaultRuleScheduleEntry's single ConsensusRules pick
-        // into the single-entry RuleSchedule NodeMetadata actually stores —
-        // an empty list if the pick landed on "hardcoded defaults", which
-        // NodeMetadata.RuleSchedule's own default already means the same
-        // thing as (see RuleSchedule.RulesForHeight in Blockchain.cs).
-        private List<RuleScheduleEntry> PickDefaultRuleSchedule(int height)
-        {
-            var rules = PickDefaultRuleScheduleEntry(height);
-            return rules == null
-                ? new List<RuleScheduleEntry>()
-                : new List<RuleScheduleEntry> { new RuleScheduleEntry { FromHeight = 0, Rules = rules } };
+            return new List<RuleScheduleEntry>(); // unclaimed remainder — hardcoded defaults
         }
 
         // Exponential growth, not linear: each tick, the network grows by
