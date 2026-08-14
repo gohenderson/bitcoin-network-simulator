@@ -149,7 +149,11 @@ fact. See [`Scenario.cs`](Scenario.cs) for the full format. Example:
 
 - `NodeGroups` — starting nodes, applied in order, as `{Count, Role, HashPower, CanMine, Pool, EconomicWeight}` groups.
 - `AutoGrowth` (default `true`) — whether the network keeps growing organically on top of `NodeGroups`.
-- `GrowthIntervalSeconds` / `MaxNodes` — override organic growth's pace/cap.
+- `GrowthIntervalSeconds` / `GrowthRate` / `MaxNodes` — override organic growth's pace/rate/cap. `GrowthRate` is a multiplier on the current node count applied each tick (default `2.0`, doubling; `1.5` adds 50% per tick).
+- `GrowthJitterSeconds` — random +/- range applied to `GrowthIntervalSeconds` each tick, so growth doesn't land on a perfectly regular schedule (default `0`, no jitter).
+- `GrowthMinSeedNodes` — floor the network tops up to, one node per tick, before `GrowthRate` scaling takes over (default `0`, no floor — rate scaling applies from the first tick).
+- `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling.
+- `ChurnIntervalSeconds` / `ChurnRate` / `ChurnMinNodes` — nodes leaving the live network, growth's counterpart. `ChurnRate` is the fraction of the current node count removed each tick (default `0`, disabled); `ChurnMinNodes` is a floor churn won't shrink below (default `1`). Independent of `AutoGrowth` — can run growth and churn together, or churn alone on a fixed `NodeGroups` population.
 - `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
 - `DurationSeconds` — automatically stop after this many seconds (Enter still works too, to stop early).
 

@@ -58,8 +58,17 @@ namespace BitcoinNetworkSimulator
 
             var effectiveMaxNodes = scenario?.MaxNodes ?? NodeNetwork.DefaultMaxNodes;
             var effectiveGrowthIntervalMs = scenario?.GrowthIntervalSeconds is int gis ? gis * 1000 : NodeNetwork.DefaultGrowthIntervalMs;
+            var effectiveGrowthRate = scenario?.GrowthRate ?? NodeNetwork.DefaultGrowthRate;
+            var effectiveGrowthJitterMs = scenario?.GrowthJitterSeconds is double gjs ? (int)(gjs * 1000) : NodeNetwork.DefaultGrowthJitterMs;
+            var effectiveGrowthMinSeedNodes = scenario?.GrowthMinSeedNodes ?? NodeNetwork.DefaultGrowthMinSeedNodes;
             var effectiveOutboundPeerCount = scenario?.OutboundPeerCount ?? NodeNetwork.DefaultOutboundPeerCount;
+            var effectiveMaliciousFraction = scenario?.GrowthMaliciousFraction ?? NodeNetwork.DefaultMaliciousFraction;
+            var effectiveWalletOnlyFraction = scenario?.GrowthWalletOnlyFraction ?? NodeNetwork.DefaultWalletOnlyFraction;
+            var effectiveChurnIntervalMs = scenario?.ChurnIntervalSeconds is int cis ? cis * 1000 : NodeNetwork.DefaultChurnIntervalMs;
+            var effectiveChurnRate = scenario?.ChurnRate ?? NodeNetwork.DefaultChurnRate;
+            var effectiveChurnMinNodes = scenario?.ChurnMinNodes ?? NodeNetwork.DefaultChurnMinNodes;
             var autoGrowthEnabled = scenario?.AutoGrowth ?? true;
+            var churnEnabled = effectiveChurnRate > 0;
 
             if (scenario != null)
             {
@@ -69,7 +78,7 @@ namespace BitcoinNetworkSimulator
             }
             else
             {
-                Console.WriteLine($"Dynamic network: starts at 1 node, roughly doubles every {effectiveGrowthIntervalMs / 1000} s (cap: {effectiveMaxNodes}).");
+                Console.WriteLine($"Dynamic network: starts at 1 node, grows {effectiveGrowthRate}x every {effectiveGrowthIntervalMs / 1000} s (cap: {effectiveMaxNodes}).");
             }
             Console.WriteLine("Mining is round-robin across active nodes — no per-node background threads.");
             Console.WriteLine("Real proof-of-work: a public, deterministically-derived target.\n");
@@ -78,7 +87,7 @@ namespace BitcoinNetworkSimulator
             using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, scenario != null ? scenarioPath : null, scenario?.Description);
             var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
-            var network = new NodeNetwork(RunRootDir, Port, effectiveOutboundPeerCount);
+            var network = new NodeNetwork(RunRootDir, Port, effectiveOutboundPeerCount, effectiveMaliciousFraction, effectiveWalletOnlyFraction);
 
             // One shared listener for the whole network — see
             // NetworkServer.cs — dispatching every request by the node id in
@@ -101,12 +110,16 @@ namespace BitcoinNetworkSimulator
 
             var txTask = TransactionGenerator.RunAsync(network, Port, cts.Token);
             var growthTask = autoGrowthEnabled
-                ? network.GrowthLoopAsync(watcher, cts.Token, effectiveMaxNodes, effectiveGrowthIntervalMs)
+                ? network.GrowthLoopAsync(watcher, cts.Token, effectiveMaxNodes, effectiveGrowthIntervalMs, effectiveGrowthRate, effectiveGrowthJitterMs, effectiveGrowthMinSeedNodes)
+                : Task.CompletedTask;
+            var churnTask = churnEnabled
+                ? network.ChurnLoopAsync(watcher, cts.Token, effectiveChurnIntervalMs, effectiveChurnRate, effectiveChurnMinNodes)
                 : Task.CompletedTask;
             var watcherTask = watcher.RunAsync(cts.Token);
 
             Console.WriteLine($"All nodes share http://localhost:{Port}/ — address one by id in the path." +
-                (autoGrowthEnabled ? " Network grows automatically." : " Auto-growth disabled — network stays fixed."));
+                (autoGrowthEnabled ? " Network grows automatically." : " Auto-growth disabled — network stays fixed.") +
+                (churnEnabled ? $" Churn: {effectiveChurnRate:P0} every {effectiveChurnIntervalMs / 1000}s (floor: {effectiveChurnMinNodes})." : ""));
             Console.WriteLine($"Try: curl http://localhost:{Port}/{NodeNetwork.NodeNameFor(0)}/chain");
             Console.WriteLine($"Or:  curl http://localhost:{Port}/{NodeNetwork.NodeNameFor(0)}/balances");
             Console.WriteLine("Watcher: inspect watcher.db (SQLite) for convergence/recovery history.");
@@ -131,7 +144,7 @@ namespace BitcoinNetworkSimulator
             try
             {
                 await Task.WhenAll(
-                    new[] { miningTask, txTask, growthTask, watcherTask }
+                    new[] { miningTask, txTask, growthTask, churnTask, watcherTask }
                     .Concat(network.SnapshotPersistTasks()));
             }
             catch (OperationCanceledException) { }

@@ -77,6 +77,18 @@ namespace BitcoinNetworkSimulator
             }
         }
 
+        // Called by NodeNetwork.RemoveNode (churn) so AuditAsync stops
+        // polling a departed node's /chain endpoint — otherwise every future
+        // audit would find it 404ing and permanently mark it structurally
+        // invalid, skewing AllChainsValid/ChainsConverged.
+        public void RemoveNode(string nodeId)
+        {
+            lock (_lock)
+            {
+                _nodeIds.Remove(nodeId);
+            }
+        }
+
         public void ObserveBuild(string nodeId, Block block, NodeRole role)
         {
             lock (_lock)

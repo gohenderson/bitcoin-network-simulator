@@ -515,6 +515,18 @@ namespace BitcoinNetworkSimulator
             lock (_lock) { _members.Add(member); }
         }
 
+        public int MemberCount { get { lock (_lock) { return _members.Count; } } }
+
+        // Used by NodeNetwork.RemoveNode (churn) to drop a departing member.
+        // Returns whether the id was actually a member — MemberCount == 0
+        // afterward tells the caller this pool has no one left and should be
+        // torn down entirely, since MineOneRoundAsync assumes at least one
+        // member (WeightedRandomMember indexes into a non-empty list).
+        public bool RemoveMemberIfPresent(string nodeId)
+        {
+            lock (_lock) { return _members.RemoveAll(m => m.Id == nodeId) > 0; }
+        }
+
         public async Task MineOneRoundAsync(CancellationToken token)
         {
             List<SoloMiner> members;

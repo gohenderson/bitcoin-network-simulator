@@ -37,16 +37,74 @@ namespace BitcoinNetworkSimulator
         // NodeGroups add up to, for this run's whole duration.
         public bool AutoGrowth { get; set; } = true;
 
-        // Overrides for organic growth's pacing/cap — only consulted when
-        // AutoGrowth is true. Null means "use Program's built-in defaults"
-        // (GrowthIntervalMs, MaxNodes).
+        // Overrides for organic growth's pacing/rate/cap — only consulted
+        // when AutoGrowth is true. Null means "use NodeNetwork's built-in
+        // defaults" (DefaultGrowthIntervalMs, DefaultGrowthRate, DefaultMaxNodes).
         public int? GrowthIntervalSeconds { get; set; }
+
+        // Multiplier applied to the current node count each growth tick —
+        // see NodeNetwork.GrowthLoopAsync. 2.0 (the default) doubles the
+        // network every tick; 1.5 adds 50% more nodes per tick. A value at
+        // or below 1.0 stalls growth entirely — the tick keeps firing but
+        // never adds a node, so the loop only exits via cancellation.
+        public double? GrowthRate { get; set; }
+
+        // Random +/- range applied to GrowthIntervalSeconds on every tick, so
+        // growth doesn't land on a perfectly metronomic schedule — see
+        // NodeNetwork.GrowthLoopAsync. Null/0 means no jitter (exactly
+        // GrowthIntervalSeconds every tick, the pre-existing behavior).
+        public double? GrowthJitterSeconds { get; set; }
+
+        // Floor the network tops up to — one node per tick, ignoring
+        // GrowthRate — before exponential growth-rate scaling takes over.
+        // Null/0 means no floor: growth-rate scaling applies from the very
+        // first tick, the pre-existing behavior. Useful when NodeGroups (or
+        // the single-node default start) seed fewer nodes than you want
+        // established before the network starts compounding.
+        public int? GrowthMinSeedNodes { get; set; }
+
         public int? MaxNodes { get; set; }
 
         // How many outbound peers each node picks at creation — see the
         // "Peer topology" note in README.md. Null means
         // NodeNetwork.DefaultOutboundPeerCount (8, matching real Bitcoin).
         public int? OutboundPeerCount { get; set; }
+
+        // Fraction of newly-created nodes (both the initial dynamic-start
+        // node and every node organic growth adds) assigned a malicious role
+        // instead of Honest, cycling through the four malicious types in
+        // order — see NodeNetwork.AssignRole. Null means
+        // NodeNetwork.DefaultMaliciousFraction (0.5, the pre-existing
+        // index%8 behavior). Only affects nodes with no metadata.json yet;
+        // NodeGroups-authored nodes always use their own Role.
+        public double? GrowthMaliciousFraction { get; set; }
+
+        // Fraction of newly-created nodes assigned wallet-only (CanMine
+        // false) instead of mining-capable — see NodeNetwork.AssignCanMine.
+        // Null means NodeNetwork.DefaultWalletOnlyFraction (1/3, the
+        // pre-existing index%3 behavior). Same "no metadata.json yet" scope
+        // as GrowthMaliciousFraction.
+        public double? GrowthWalletOnlyFraction { get; set; }
+
+        // Node churn — nodes leaving the live network, the counterpart to
+        // organic growth — see NodeNetwork.ChurnLoopAsync. Independent of
+        // AutoGrowth: churn runs whenever ChurnRate is set above 0, whether
+        // or not the network is also growing. Null/0 ChurnRate means no
+        // churn at all (the pre-existing behavior — nodes never used to
+        // leave). ChurnIntervalSeconds null means
+        // NodeNetwork.DefaultChurnIntervalMs.
+        public int? ChurnIntervalSeconds { get; set; }
+
+        // Fraction of the current node count removed each churn tick
+        // (floored — a low rate on a small network simply skips removal
+        // that tick rather than over-shrinking it). Null means
+        // NodeNetwork.DefaultChurnRate (0.0, disabled).
+        public double? ChurnRate { get; set; }
+
+        // Floor churn will never shrink the network below. Null means
+        // NodeNetwork.DefaultChurnMinNodes (1 — mining needs at least one
+        // node to make progress).
+        public int? ChurnMinNodes { get; set; }
 
         // Each entry describes Count identically-configured nodes to create
         // up front, applied in the order listed — e.g. a group of 10 plain

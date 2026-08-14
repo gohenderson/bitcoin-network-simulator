@@ -37,7 +37,15 @@ namespace BitcoinNetworkSimulator
     {
         public const int DefaultMaxNodes = 100;
         public const int DefaultGrowthIntervalMs = 8000; // roughly double the network every 8 s — see GrowthLoopAsync
+        public const double DefaultGrowthRate = 2.0; // doubles the network each tick — see GrowthLoopAsync
+        public const int DefaultGrowthJitterMs = 0; // no jitter — every tick lands exactly GrowthIntervalMs apart
+        public const int DefaultGrowthMinSeedNodes = 0; // no floor — growth-rate scaling applies from the first tick
         public const int DefaultOutboundPeerCount = 8; // matches real Bitcoin's default outbound connection count
+        public const double DefaultMaliciousFraction = 0.5; // matches the pre-existing index%8 behavior — see AssignRole
+        public const double DefaultWalletOnlyFraction = 1.0 / 3.0; // matches the pre-existing index%3 behavior — see AssignCanMine
+        public const int DefaultChurnIntervalMs = 8000;
+        public const double DefaultChurnRate = 0.0; // disabled — no scenario opts into churn by default
+        public const int DefaultChurnMinNodes = 1; // never churn the network down to nothing
 
         private static readonly string[] GreekNames =
         {
@@ -53,38 +61,62 @@ namespace BitcoinNetworkSimulator
         public static string NodeNameFor(int index) =>
             $"{index:D3}-{GreekNames[index % GreekNames.Length]}";
 
-        // Default assignment for a brand new node with no metadata.json yet:
-        // every 8th node cycles through one of each malicious type, the rest are
-        // honest. Only used the first time a given node id is created — see
-        // NodeMetadataStore.LoadOrCreateAsync, which persists this so it (or a
-        // hand edit on top of it) sticks across restarts.
-        private static NodeRole AssignRole(int index) => (index % 8) switch
+        private static readonly NodeRole[] MaliciousRoles =
         {
-            4 => NodeRole.Equivocator,
-            5 => NodeRole.Impersonator,
-            6 => NodeRole.Corruptor,
-            7 => NodeRole.Withholder,
-            _ => NodeRole.Honest
+            NodeRole.Equivocator, NodeRole.Impersonator, NodeRole.Corruptor, NodeRole.Withholder
         };
 
-        // Default mining participation for a brand new node: every 3rd node is
-        // wallet-only (fully validates, gossips, sends/receives transactions,
-        // but never gets a mining turn), so a fresh run shows a mix without any
-        // manual edits. Same override rules as AssignRole — see
-        // NodeMetadataStore.LoadOrCreateAsync and the "Mining participation"
-        // note in README.md.
-        private static bool AssignCanMine(int index) => index % 3 != 2;
+        // Default assignment for a brand new node with no metadata.json yet:
+        // a maliciousFraction share of nodes cycle through one of each
+        // malicious type in turn, the rest are honest. Scenario-configurable
+        // via GrowthMaliciousFraction (default 0.5, reproducing the original
+        // hardcoded index%8 behavior exactly: cycleLen = 4/0.5 = 8, first 4
+        // of every 8 honest, last 4 one of each malicious type). Only used
+        // the first time a given node id is created — see
+        // NodeMetadataStore.LoadOrCreateAsync, which persists this so it (or a
+        // hand edit on top of it) sticks across restarts.
+        private static NodeRole AssignRole(int index, double maliciousFraction)
+        {
+            if (maliciousFraction <= 0) return NodeRole.Honest;
+
+            var cycleLen = Math.Max(MaliciousRoles.Length, (int)Math.Round(MaliciousRoles.Length / Math.Min(maliciousFraction, 1.0)));
+            var honestSlots = cycleLen - MaliciousRoles.Length;
+            var pos = index % cycleLen;
+            return pos < honestSlots ? NodeRole.Honest : MaliciousRoles[pos - honestSlots];
+        }
+
+        // Default mining participation for a brand new node: a
+        // walletOnlyFraction share of nodes are wallet-only (fully validates,
+        // gossips, sends/receives transactions, but never gets a mining
+        // turn), so a fresh run shows a mix without any manual edits.
+        // Scenario-configurable via GrowthWalletOnlyFraction (default 1/3,
+        // reproducing the original hardcoded index%3 behavior exactly:
+        // cycleLen = round(1 / (1/3)) = 3, every 3rd node wallet-only). Same
+        // override rules as AssignRole — see NodeMetadataStore.LoadOrCreateAsync
+        // and the "Mining participation" note in README.md.
+        private static bool AssignCanMine(int index, double walletOnlyFraction)
+        {
+            if (walletOnlyFraction <= 0) return true;
+
+            var cycleLen = Math.Max(1, (int)Math.Round(1.0 / Math.Min(walletOnlyFraction, 1.0)));
+            return index % cycleLen != cycleLen - 1;
+        }
 
         private readonly string _runRootDir;
         private readonly int _port;
         private readonly int _outboundPeerCount;
+        private readonly double _maliciousFraction;
+        private readonly double _walletOnlyFraction;
         private readonly Random _rng = new();
         private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
+        private readonly Random _growthTimingRng = new(); // dedicated so growth-tick jitter never shares a Random with concurrently-running mining/peer-selection code
+        private readonly Random _churnRng = new(); // dedicated so churn's node selection never shares a Random with concurrently-running mining/peer-selection/growth-timing code
 
         // All mutable registry state below is guarded by this one lock —
         // nodes call the getters at broadcast time so newly joined peers are
         // automatically included without any wiring.
         private readonly object _lock = new();
+        private int _nextJoinIndex = 0; // ever-increasing — see AddNodeAsync's comment on why churn makes _allNodeIds.Count unsafe to reuse for this
         private readonly List<string> _allNodeIds = new();
         private readonly List<Node> _allNodes = new();
         private readonly Dictionary<string, Node> _nodesById = new();
@@ -103,11 +135,13 @@ namespace BitcoinNetworkSimulator
         private readonly Dictionary<string, HashSet<string>> _peerIdsByNodeId = new();
         private readonly Dictionary<string, int> _economicWeightByNodeId = new();
 
-        public NodeNetwork(string runRootDir, int port, int outboundPeerCount)
+        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction)
         {
             _runRootDir = runRootDir;
             _port = port;
             _outboundPeerCount = outboundPeerCount;
+            _maliciousFraction = maliciousFraction;
+            _walletOnlyFraction = walletOnlyFraction;
         }
 
         public List<string> GetAllNodeIds() { lock (_lock) { return new List<string>(_allNodeIds); } }
@@ -152,7 +186,16 @@ namespace BitcoinNetworkSimulator
             Dictionary<string, int> existingWeights;
             lock (_lock)
             {
-                index = _allNodeIds.Count;
+                // _nextJoinIndex, not _allNodeIds.Count: once churn can remove
+                // nodes, the live count shrinks, and reusing it here would
+                // hand a departed node's index — and therefore its id, disk
+                // directory, signing key, and blockchain.db — to a supposedly
+                // brand-new node, including two concurrent BlockchainStore
+                // instances writing the same file (the departed node's
+                // still-running PersistenceLoop, plus the new one). A
+                // dedicated counter that only ever increments guarantees
+                // every id is used exactly once for the lifetime of the run.
+                index = _nextJoinIndex++;
                 existingIds = new List<string>(_allNodeIds);
                 existingWeights = new Dictionary<string, int>(_economicWeightByNodeId);
             }
@@ -160,7 +203,7 @@ namespace BitcoinNetworkSimulator
             var id = NodeNameFor(index);
 
             Directory.CreateDirectory(NodeDirFor(id));
-            var metadata = await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index), AssignCanMine(index));
+            var metadata = await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index, _maliciousFraction), AssignCanMine(index, _walletOnlyFraction));
 
             // Picked from every node that exists so far (this node's own id
             // isn't in existingIds yet) — see the "Peer topology" note in
@@ -269,30 +312,137 @@ namespace BitcoinNetworkSimulator
             return chosen;
         }
 
-        // Roughly exponential growth, not linear: each tick, as many new nodes
-        // join as already exist — a network effect where the bigger it already
-        // is, the faster it grows, rather than a fixed trickle of one at a
-        // time — capped so the total never exceeds maxNodes. New nodes are
-        // added one at a time (sequential awaits) so each gets a clean,
-        // atomically-assigned index/port. maxNodes/growthIntervalMs default to
-        // DefaultMaxNodes/DefaultGrowthIntervalMs but can be overridden by a
-        // scenario's MaxNodes/GrowthIntervalSeconds — see "Scenarios" in
+        // Exponential growth, not linear: each tick, the network grows by
+        // growthRate applied to however many nodes already exist — e.g.
+        // growthRate 2.0 (the default) adds as many new nodes as already
+        // exist, a network effect where the bigger it already is, the faster
+        // it grows, rather than a fixed trickle of one at a time — capped so
+        // the total never exceeds maxNodes. Ceiling'd so a fractional rate
+        // still makes forward progress on a small network instead of
+        // rounding down to zero added nodes forever. New nodes are added one
+        // at a time (sequential awaits) so each gets a clean,
+        // atomically-assigned index/port.
+        //
+        // Below growthMinSeedNodes, growth-rate scaling is skipped entirely
+        // in favor of a flat one-node-per-tick top-up, so a scenario that
+        // wants (say) a guaranteed 20-node base before compounding kicks in
+        // doesn't have to fight a doubling curve that's still tiny at first.
+        //
+        // Each tick's delay is growthIntervalMs +/- a random draw up to
+        // growthJitterMs (clamped so the delay itself never goes negative),
+        // so ticks don't land on a perfectly regular schedule.
+        //
+        // maxNodes/growthIntervalMs/growthRate/growthJitterMs/growthMinSeedNodes
+        // default to NodeNetwork's Default* constants but can be overridden
+        // by a scenario's MaxNodes/GrowthIntervalSeconds/GrowthRate/
+        // GrowthJitterSeconds/GrowthMinSeedNodes — see "Scenarios" in
         // README.md.
-        public async Task GrowthLoopAsync(ChainWatcher watcher, CancellationToken token, int maxNodes, int growthIntervalMs)
+        public async Task GrowthLoopAsync(ChainWatcher watcher, CancellationToken token, int maxNodes, int growthIntervalMs, double growthRate, int growthJitterMs, int growthMinSeedNodes)
         {
             while (!token.IsCancellationRequested)
             {
-                try { await Task.Delay(growthIntervalMs, token); }
+                var jitter = growthJitterMs > 0 ? _growthTimingRng.Next(-growthJitterMs, growthJitterMs + 1) : 0;
+                var delayMs = Math.Max(0, growthIntervalMs + jitter);
+                try { await Task.Delay(delayMs, token); }
                 catch (OperationCanceledException) { break; }
 
                 int count;
                 lock (_lock) { count = _allNodes.Count; }
                 if (count >= maxNodes) break;
 
-                var toAdd = Math.Min(count, maxNodes - count);
+                var toAdd = count < growthMinSeedNodes
+                    ? Math.Min(growthMinSeedNodes - count, maxNodes - count)
+                    : Math.Min((int)Math.Ceiling(count * Math.Max(0.0, growthRate - 1.0)), maxNodes - count);
                 for (int i = 0; i < toAdd; i++)
                     await AddNodeAsync(watcher, token);
             }
+        }
+
+        // Node churn: each tick, removes a churnRate share of the current
+        // node count (floored, so a low rate on a small network simply skips
+        // removal that tick rather than aggressively shrinking it), never
+        // dropping below churnMinNodes. Candidates are picked uniformly at
+        // random from every live node — solo, wallet-only, and pool members
+        // alike are all safe to remove (see RemoveNode); there's no need to
+        // special-case a pool's last member since RemoveNode tears the pool
+        // down cleanly when that happens. churnIntervalMs/churnRate/
+        // churnMinNodes default to NodeNetwork's Default* constants but can
+        // be overridden by a scenario's ChurnIntervalSeconds/ChurnRate/
+        // ChurnMinNodes — see "Scenarios" in README.md.
+        public async Task ChurnLoopAsync(ChainWatcher watcher, CancellationToken token, int churnIntervalMs, double churnRate, int churnMinNodes)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try { await Task.Delay(churnIntervalMs, token); }
+                catch (OperationCanceledException) { break; }
+
+                List<string> toRemove;
+                lock (_lock)
+                {
+                    var count = _allNodeIds.Count;
+                    var removable = Math.Max(0, count - churnMinNodes);
+                    var n = Math.Min(removable, (int)Math.Floor(count * churnRate));
+
+                    toRemove = new List<string>();
+                    if (n > 0)
+                    {
+                        var pool = new List<string>(_allNodeIds);
+                        for (var i = 0; i < n; i++)
+                        {
+                            var idx = _churnRng.Next(pool.Count);
+                            toRemove.Add(pool[idx]);
+                            pool.RemoveAt(idx);
+                        }
+                    }
+                }
+
+                foreach (var id in toRemove)
+                    RemoveNode(id, watcher);
+            }
+        }
+
+        // The inverse of AddNodeAsync — see the "Node churn" note above.
+        // Synchronous: every structure it touches is in-memory (registry,
+        // peer graph, miner roster); nothing here needs to await. Two things
+        // deliberately keep running unsignaled after removal, since neither
+        // touches the registry, peer graph, or miner roster, and both are
+        // harmless (arguably desirable — they preserve the departed node's
+        // final state) to leave going until the whole run's CancellationToken
+        // fires: its PersistenceLoop task (still in _persistTasks) and its
+        // BlockchainStore (still in _blockchainStores).
+        public void RemoveNode(string nodeId, ChainWatcher watcher)
+        {
+            lock (_lock)
+            {
+                if (!_nodesById.Remove(nodeId)) return;
+
+                _allNodes.RemoveAll(n => n.Id == nodeId);
+                _allNodeIds.Remove(nodeId);
+                _economicWeightByNodeId.Remove(nodeId);
+
+                // Bidirectional — see the "Peer topology" note in README.md:
+                // drop this node's own edge set, and this node's id out of
+                // every peer that had picked it too.
+                if (_peerIdsByNodeId.TryGetValue(nodeId, out var mySet))
+                {
+                    foreach (var peerId in mySet)
+                        if (_peerIdsByNodeId.TryGetValue(peerId, out var peerSet))
+                            peerSet.Remove(nodeId);
+                }
+                _peerIdsByNodeId.Remove(nodeId);
+
+                _allMiners.RemoveAll(m => m is SoloMiner sm && sm.Id == nodeId);
+                foreach (var (poolName, pool) in _poolMinersByName.ToList())
+                {
+                    if (pool.RemoveMemberIfPresent(nodeId) && pool.MemberCount == 0)
+                    {
+                        _poolMinersByName.Remove(poolName);
+                        _allMiners.Remove(pool);
+                    }
+                }
+            }
+            watcher.RemoveNode(nodeId);
+            Console.WriteLine($"[network] node {nodeId} left (churn)");
         }
     }
 }
