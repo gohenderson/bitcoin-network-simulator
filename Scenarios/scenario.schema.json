@@ -126,6 +126,12 @@
           "default": 1,
           "description": "Simulated hash power — higher values win proportionally more mining rounds, not deterministically every time."
         },
+        "CostPerAttempt": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "$ cost of a single mining attempt (one nonce tried) — see \"Mining costs\" in README.md. Only consulted for a ValueSeeking group: if the best candidate's value doesn't clear CostPerAttempt x HashPower this turn, the group sits idle instead of mining at a guaranteed loss. Default 0 means mining is free (unchanged behavior)."
+        },
         "CanMine": {
           "type": "boolean",
           "default": true,

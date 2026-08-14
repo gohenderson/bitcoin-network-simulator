@@ -362,6 +362,23 @@ only for now, not (yet) available to organically-grown nodes via
 `DefaultRuleSchedule`. See `Scenarios/value-seeking-competition.yaml` for
 this exact example running end to end.
 
+**Mining costs.** `ValueSeeking`'s profitability comparison assumes mining
+is free — real mining costs electricity and hardware. `CostPerAttempt` (a
+per-`NodeGroups` field, default `0`) puts a $ price on each nonce a node
+tries. Because the same hardware costs the same to run regardless of which
+candidate ruleset it's pointed at, this cost is identical across every
+candidate — so it never changes *which* one is most profitable, only
+*whether* mining is worth doing at all this turn: each turn, if the best
+candidate's value doesn't clear `CostPerAttempt x HashPower`, the node
+sits out entirely (`going idle` in the console) rather than mining at a
+guaranteed loss, and resumes (`resuming mining`) the moment a candidate
+clears the bar again — modeling real hash power abandoning an
+unprofitable market instead of chasing a doomed reward. Continuing the
+example above, adding `CostPerAttempt: 10` to a `HashPower: 20` group
+means anything below a value of `200` isn't worth mining — see
+`Scenarios/value-seeking-competition.yaml`'s third price stage, where both
+rulesets crash together and the group goes idle.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -445,6 +462,7 @@ Per-NodeGroup fields:
 - `Count` (default `1`) — how many identically-configured nodes this group creates.
 - `Role` (default `Honest`) — see [Node roles](#node-roles) below.
 - `HashPower` (default `1`) — simulated hash power; see the "Mining" note above.
+- `CostPerAttempt` (default `0`, mining is free) — see the "Mining costs" note above. `$` cost per nonce tried; only consulted for a `ValueSeeking` group, which sits idle instead of mining any turn its best candidate doesn't clear `CostPerAttempt x HashPower`.
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
@@ -484,7 +502,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `large-scale-organic-growth.yaml` | A larger network growing over time. |
 | `economic-hub-topology.yaml` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
 | `consensus-rule-switch.yaml` | Two groups start under the same rules; one switches to a different named `RuleSchedule` entry partway through and the other doesn't — a real, simulated hard fork. |
-| `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. |
+| `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. A third price crash then drops both rulesets below `CostPerAttempt`, and the group goes idle rather than mine at a loss. |
 
 ## Node roles
 

@@ -12,6 +12,7 @@ NodeRules:
     PriceSchedule:
       - { FromHeight: 0, Price: 100 }   # starts strongly ahead
       - { FromHeight: 8, Price: 5 }     # then crashes
+      - { FromHeight: 16, Price: 1 }    # crashes further — nothing is worth mining anymore
   - Name: bitcoin-cash
     RetargetIntervalBlocks: 2016
     TargetSecondsPerBlock: 600
@@ -24,6 +25,7 @@ NodeRules:
     PriceSchedule:
       - { FromHeight: 0, Price: 20 }    # starts behind
       - { FromHeight: 8, Price: 200 }   # then pumps, overtaking real-bitcoin
+      - { FromHeight: 16, Price: 1 }    # the pump fades too
 
 Phases:
   - Description: >-
@@ -37,13 +39,18 @@ Phases:
       the formula is public and deterministic, so they all reach the same answer. A fixed
       2-node control group stays on real-bitcoin the whole time and forks away from the
       ValueSeeking group the moment it switches — see the "Peer discouragement" note in
-      README.md for what that does to their connection.
-    DurationSeconds: 180
+      README.md for what that does to their connection. At height 16 both prices collapse
+      — real-bitcoin 50 x 1 = 50 and bitcoin-cash 10 x 1 = 10 both fall under this group's
+      mining cost (CostPerAttempt 10 x HashPower 20 = 200 per turn) — so every ValueSeeking
+      node goes idle rather than mining at a loss, exactly like real hash power abandoning
+      an unprofitable market instead of chasing a doomed reward.
+    DurationSeconds: 300
     AutoGrowth: false
     NodeGroups:
       - Count: 4
         Role: Honest
         HashPower: 20
+        CostPerAttempt: 10
         ValueSeeking: true
         ValueSeekingCandidates: [real-bitcoin, bitcoin-cash]
       - Count: 2

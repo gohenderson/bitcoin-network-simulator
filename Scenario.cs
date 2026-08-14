@@ -252,6 +252,15 @@ namespace BitcoinNetworkSimulator
         public int Count { get; set; } = 1;
         public NodeRole Role { get; set; } = NodeRole.Honest;
         public int HashPower { get; set; } = 1;
+        // $ cost of a single mining attempt (one nonce tried) — see "Mining costs"
+        // in README.md and RuleSchedule.BestValueAt in Blockchain.cs. Only
+        // consulted for a ValueSeeking group: each turn, if this group's best
+        // candidate's value doesn't clear CostPerAttempt x HashPower, it sits
+        // idle rather than mining at a guaranteed loss. Default 0 means mining is
+        // free (today's behavior, unchanged) — a group must opt in explicitly.
+        // No effect on a group using a fixed RulesName/RuleSchedule, which was
+        // never a profitability decision to begin with.
+        public decimal CostPerAttempt { get; set; } = 0m;
         public bool CanMine { get; set; } = true;
         public string? Pool { get; set; } = null;
         // See NodeMetadata.EconomicWeight and the "Peer topology" note in

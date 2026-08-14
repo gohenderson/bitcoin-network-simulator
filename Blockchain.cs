@@ -326,12 +326,29 @@ namespace BitcoinNetworkSimulator
             return active;
         }
 
+        // The best candidate's raw expected value (NominalBlockReward x price) at
+        // `height` — decimal.MaxValue in static mode, so a cost comparison against
+        // it never triggers (a scripted/static schedule isn't a profitability
+        // decision to begin with, so there's nothing for a mining cost to
+        // override). Used by SoloMiner to decide whether ANY candidate clears its
+        // own mining cost this turn — see "Mining costs" in README.md.
+        public decimal BestValueAt(int height) =>
+            _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Value : decimal.MaxValue;
+
         // Picks whichever candidate's NominalBlockReward x price-at-height is
         // highest; first-in-list wins an exact tie (deterministic, same list
         // order on every node). Falls back to `new ConsensusRules()` — same
         // fallback an empty static schedule gets — when every candidate is
         // worth exactly $0 (e.g. no PriceSchedule entry has activated yet).
         private ConsensusRules MostProfitableAt(int height)
+        {
+            var (best, value) = BestCandidateAt(height);
+            return (best != null && value > 0m) ? best : new ConsensusRules();
+        }
+
+        // Shared by MostProfitableAt and BestValueAt so both only ever walk
+        // _valueSeekingCandidates once, from one place.
+        private (ConsensusRules? Rules, decimal Value) BestCandidateAt(int height)
         {
             ConsensusRules? best = null;
             var bestValue = 0m;
@@ -345,7 +362,7 @@ namespace BitcoinNetworkSimulator
                     bestValue = value;
                 }
             }
-            return (best != null && bestValue > 0m) ? best : new ConsensusRules();
+            return (best, bestValue);
         }
 
         private static decimal PriceAt(List<PriceScheduleEntry> schedule, int height)

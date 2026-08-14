@@ -411,6 +411,11 @@ namespace BitcoinNetworkSimulator
         public string Id { get; set; } = "";
         public NodeRole NodeRole { get; set; } = NodeRole.Honest;
         public int HashPower { get; set; } = 1;
+        // $ cost of a single mining attempt — see ScenarioNodeGroup.CostPerAttempt
+        // and RuleSchedule.BestValueAt in Blockchain.cs. Persisted for the same
+        // restart-safety reason every other group-authored field is. 0 (default)
+        // means mining is free, same as omitting it entirely.
+        public decimal CostPerAttempt { get; set; } = 0m;
         // Whether this node ever gets a mining turn. A node with CanMine false
         // still does everything else a full node does — serves /chain, /tx,
         // /balances, receives and validates blocks and chains from peers, holds
@@ -605,6 +610,7 @@ namespace BitcoinNetworkSimulator
             metadata.EconomicWeight = group.EconomicWeight;
             metadata.RuleSchedule = group.ResolvedRuleSchedule;
             metadata.ValueSeekingCandidates = group.ResolvedValueSeekingCandidates;
+            metadata.CostPerAttempt = group.CostPerAttempt;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

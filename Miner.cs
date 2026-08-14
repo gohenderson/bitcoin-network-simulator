@@ -67,17 +67,26 @@ namespace BitcoinNetworkSimulator
         private readonly ECDsa _signingKey;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly Random _rng = new(Guid.NewGuid().GetHashCode());
+        // $ cost of a single mining attempt — see ScenarioNodeGroup.CostPerAttempt
+        // and RuleSchedule.BestValueAt. 0 (default) means mining is free, so the
+        // idle check in MineAndBroadcastSingleRoundAsync never triggers.
+        private readonly decimal _costPerAttempt;
+        // Tracks whether the LAST turn was spent idle, purely so the
+        // going-idle/resuming-mining console lines only print on the transition,
+        // not every single turn of what could be a long idle stretch.
+        private bool _idleLastTurn = false;
 
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
             _serverPort = serverPort;
             _role = role;
             HashPower = Math.Max(1, hashPower);
+            _costPerAttempt = costPerAttempt;
             _ruleSchedule = ruleSchedule;
             _chain = chain;
             _mempool = mempool;
@@ -205,6 +214,26 @@ namespace BitcoinNetworkSimulator
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
             var height = parent.Index + 1;
+
+            // Real operating cost (electricity, hardware) is the same regardless
+            // of which candidate ruleset it's spent on, so it never changes WHICH
+            // one is most profitable (RuleSchedule.MostProfitableAt is untouched)
+            // — it only ever changes whether ANYTHING is worth mining this turn.
+            // Mempool transactions are untouched here (dequeued further below,
+            // never reached on an idle turn), so nothing is lost by sitting out.
+            if (_costPerAttempt > 0m && _ruleSchedule.BestValueAt(height) <= _costPerAttempt * HashPower)
+            {
+                if (!_idleLastTurn)
+                    Console.WriteLine($"[{Id}] going idle: no candidate ruleset covers this turn's mining cost ({_costPerAttempt} x {HashPower} = {_costPerAttempt * HashPower})");
+                _idleLastTurn = true;
+                return;
+            }
+            if (_idleLastTurn)
+            {
+                Console.WriteLine($"[{Id}] resuming mining: a candidate ruleset now covers this turn's cost");
+                _idleLastTurn = false;
+            }
+
             var rules = _ruleSchedule.RulesForHeight(height);
             var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
             var reward = Economics.ComputeBlockReward(ancestors, height, rules);
