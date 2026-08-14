@@ -90,20 +90,20 @@ namespace BitcoinNetworkSimulator
             // implicit single empty phase so the rest of Main only ever has
             // to deal with "a list of phases," never a special no-scenario case.
             var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.yaml");
-            var loadedPhases = await ScenarioLoader.LoadAsync(scenarioPath);
-            var phases = loadedPhases ?? new List<Scenario> { new Scenario() };
+            var loadedScenarioFile = await ScenarioLoader.LoadAsync(scenarioPath);
+            var phases = loadedScenarioFile?.Phases ?? new List<Scenario> { new Scenario() };
 
             // Every run's node folders and watcher.db land under
             // their own timestamped ScenarioResults/
             // subfolder — see "Scenarios" in README.md.
-            RunRootDir = ScenarioLoader.DetermineRunRootDir(scenarioPath, loadedPhases);
+            RunRootDir = ScenarioLoader.DetermineRunRootDir(scenarioPath, loadedScenarioFile);
             Console.WriteLine($"Results: {RunRootDir}\n");
             Console.WriteLine("Mining is round-robin across active nodes — no per-node background threads.");
             Console.WriteLine("Real proof-of-work: a public, deterministically-derived target.\n");
 
             var cts = new CancellationTokenSource();
             var combinedDescription = string.Join(" -> ", phases.Select(p => p.Description).Where(d => !string.IsNullOrWhiteSpace(d)));
-            using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, loadedPhases != null ? scenarioPath : null, combinedDescription.Length > 0 ? combinedDescription : null);
+            using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, loadedScenarioFile != null ? scenarioPath : null, combinedDescription.Length > 0 ? combinedDescription : null);
             var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
             var settings = new GrowthSettings().ApplyPhase(phases[0]);

@@ -1,10 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "BitcoinNetworkSimulator scenario",
-  "description": "A scenario file is a list of phases, applied in order: phase 0's settings and NodeGroups take effect immediately, and each later phase's settings/NodeGroups take over once the previous phase's DurationSeconds elapses. A field a phase leaves out inherits whatever the previous phase had in effect (or the built-in default, for phase 0) — a phase only needs to state what's actually changing. See Scenario.cs and the \"Scenarios\" section of README.md for the authoritative reference.",
-  "type": "array",
-  "minItems": 1,
-  "items": { "$ref": "#/definitions/phase" },
+  "description": "A scenario file is a mapping with a top-level Phases list (applied in order: phase 0's settings and NodeGroups take effect immediately, and each later phase's settings/NodeGroups take over once the previous phase's DurationSeconds elapses — a field a phase leaves out inherits whatever the previous phase had in effect, or the built-in default for phase 0) and an optional top-level NodeRules list (named ConsensusRules a NodeGroup can point to by name via RulesName, instead of every group that shares one repeating the same block). See Scenario.cs and the \"Scenarios\" section of README.md for the authoritative reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["Phases"],
+  "properties": {
+    "Phases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/phase" }
+    },
+    "NodeRules": {
+      "type": "array",
+      "description": "A named library of ConsensusRules a NodeGroup can reference by RulesName instead of repeating the same block inline. Two entries sharing a Name is a scenario-authoring mistake (the last one silently wins) — keep names unique.",
+      "items": { "$ref": "#/definitions/namedConsensusRules" }
+    }
+  },
   "definitions": {
     "phase": {
       "type": "object",
@@ -124,16 +136,21 @@
           "default": 1,
           "description": "How heavily this group is weighted when other nodes are choosing their outbound peers — see the \"Peer topology\" note in README.md. 1 is an ordinary node; higher values make this group's nodes proportionally more likely to be picked as another node's outbound peer, turning them into structural hubs."
         },
-        "Rules": {
-          "$ref": "#/definitions/consensusRules",
-          "description": "The consensus/economics ruleset this group's nodes build blocks under. Every block carries its builder's rules with it (see Blockchain.cs's ConsensusRules), so different groups genuinely can follow different rules within the same network — a block is valid if it correctly followed the rules IT declares, not some single value every node is forced to share. Omitted means every field below defaults."
+        "RulesName": {
+          "type": "string",
+          "description": "Name of an entry in the scenario file's top-level NodeRules list — the consensus/economics ruleset this group's nodes build blocks under. Every block carries its builder's rules with it (see Blockchain.cs's ConsensusRules), so different groups genuinely can follow different rules within the same network — a block is valid if it correctly followed the rules IT declares, not some single value every node is forced to share. Omitted (or a name not defined in NodeRules) means every ConsensusRules field defaults."
         }
       }
     },
-    "consensusRules": {
+    "namedConsensusRules": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["Name"],
       "properties": {
+        "Name": {
+          "type": "string",
+          "description": "How a ScenarioNodeGroup.RulesName refers to this entry. Keep unique within NodeRules — a duplicate Name is a scenario-authoring mistake (the last one silently wins)."
+        },
         "RetargetIntervalBlocks": {
           "type": "integer",
           "minimum": 1,

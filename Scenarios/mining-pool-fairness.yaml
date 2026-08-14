@@ -1,40 +1,33 @@
 # yaml-language-server: $schema=./scenario.schema.json
-- Description: >-
-    15 nodes, fixed: 10 plain solo miners plus a 5-member pool ('cooperative') at HashPower
-    50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity
-    instead of five separate weaker shots, and splits its reward proportionally among
-    members.
-  DurationSeconds: 900
-  AutoGrowth: false
-  NodeGroups:
-  - Count: 10
-    Role: Honest
-    HashPower: 1
-    CanMine: true
-    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-    # explicit here for clarity. Every block carries its builder's rules
-    # with it, so different NodeGroups genuinely can follow different
-    # rules within the same network — see README.md's "Scenarios" section.
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
-  - Count: 5
-    Role: Honest
-    HashPower: 50
-    CanMine: true
-    Pool: cooperative
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
+NodeRules:
+  # Real Bitcoin's own numbers — see README.md's "Scenarios" section.
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      15 nodes, fixed: 10 plain solo miners plus a 5-member pool ('cooperative') at HashPower
+      50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity
+      instead of five separate weaker shots, and splits its reward proportionally among
+      members.
+    DurationSeconds: 900
+    AutoGrowth: false
+    NodeGroups:
+    - Count: 10
+      Role: Honest
+      HashPower: 1
+      CanMine: true
+      RulesName: real-bitcoin
+    - Count: 5
+      Role: Honest
+      HashPower: 50
+      CanMine: true
+      Pool: cooperative
+      RulesName: real-bitcoin

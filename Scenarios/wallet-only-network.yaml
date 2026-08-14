@@ -1,38 +1,31 @@
 # yaml-language-server: $schema=./scenario.schema.json
-- Description: >-
-    3 active miners alongside 5 wallet-only nodes (CanMine false). Demonstrates MINING
-    PARTICIPATION: the wallet-only nodes still fully relay, validate, and send/receive
-    transactions once they have a balance, but never build blocks themselves.
-  DurationSeconds: 240
-  AutoGrowth: false
-  NodeGroups:
-  - Count: 3
-    Role: Honest
-    HashPower: 20
-    CanMine: true
-    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-    # explicit here for clarity. Every block carries its builder's rules
-    # with it, so different NodeGroups genuinely can follow different
-    # rules within the same network — see README.md's "Scenarios" section.
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
-  - Count: 5
-    Role: Honest
-    HashPower: 1
-    CanMine: false
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
+NodeRules:
+  # Real Bitcoin's own numbers — see README.md's "Scenarios" section.
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      3 active miners alongside 5 wallet-only nodes (CanMine false). Demonstrates MINING
+      PARTICIPATION: the wallet-only nodes still fully relay, validate, and send/receive
+      transactions once they have a balance, but never build blocks themselves.
+    DurationSeconds: 240
+    AutoGrowth: false
+    NodeGroups:
+    - Count: 3
+      Role: Honest
+      HashPower: 20
+      CanMine: true
+      RulesName: real-bitcoin
+    - Count: 5
+      Role: Honest
+      HashPower: 1
+      CanMine: false
+      RulesName: real-bitcoin

@@ -8,8 +8,37 @@ using YamlDotNet.Serialization;
 namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
+    // A scenario *file*'s root shape — see "Scenarios" in README.md. Phases
+    // is the run's timeline (see Scenario below); NodeRules is a flat,
+    // named library of ConsensusRules a NodeGroup picks from by name (see
+    // ScenarioNodeGroup.RulesName) rather than repeating the same block on
+    // every group that happens to share it. Loaded once at startup, see
+    // ScenarioLoader.LoadAsync — which also resolves every NodeGroup's
+    // RulesName against this list before returning, so nothing downstream
+    // ever has to look NodeRules up itself.
+    // ------------------------------------------------------------------
+    public class ScenarioFile
+    {
+        public List<Scenario> Phases { get; set; } = new();
+        public List<NamedConsensusRules> NodeRules { get; set; } = new();
+    }
+
+    // A ConsensusRules with a Name, purely so a ScenarioNodeGroup can refer
+    // to it from ScenarioFile.NodeRules instead of embedding the same 8
+    // fields inline on every group that uses it. The Name exists only for
+    // scenario-file authoring — see ScenarioLoader.LoadAsync's resolution
+    // pass — and is never itself part of a Block's hashed payload; what
+    // actually reaches NodeMetadata.Rules/Block.Rules is a plain
+    // (unnamed) ConsensusRules, the fully-resolved values this pointed to
+    // at load time.
+    public class NamedConsensusRules : ConsensusRules
+    {
+        public string Name { get; set; } = "";
+    }
+
+    // ------------------------------------------------------------------
     // Declarative description of one phase of a run — see "Scenarios" in
-    // README.md. A scenario *file* is a YAML list of these, applied in
+    // README.md. ScenarioFile.Phases is a list of these, applied in
     // order: phase 0's settings and NodeGroups take effect immediately,
     // and each later phase's settings/NodeGroups take over once the
     // previous phase's DurationSeconds elapses — letting a single run
@@ -18,12 +47,11 @@ namespace BitcoinNetworkSimulator
     // being fixed for its whole duration. Any field a phase leaves null
     // inherits whatever the previous phase had in effect (or NodeNetwork's
     // built-in default, for phase 0) — a phase only needs to state what's
-    // actually changing. Loaded once at startup (see ScenarioLoader.LoadAsync);
-    // Program is responsible for turning this into actual persisted node
-    // metadata and runtime behavior — see NodeMetadataStore.LoadOrCreateFromGroupAsync.
-    // Deliberately a plain data model with no dependency on Program's
-    // internals, so this file can be read in isolation to understand the
-    // whole format.
+    // actually changing. Program is responsible for turning this into
+    // actual persisted node metadata and runtime behavior — see
+    // NodeMetadataStore.LoadOrCreateFromGroupAsync. Deliberately a plain
+    // data model with no dependency on Program's internals, so this file
+    // can be read in isolation to understand the whole format.
     // ------------------------------------------------------------------
     public class Scenario
     {
@@ -151,18 +179,33 @@ namespace BitcoinNetworkSimulator
         // nodes proportionally more likely to be picked as another node's
         // outbound peer, turning them into structural hubs.
         public int EconomicWeight { get; set; } = 1;
-        // The consensus/economics ruleset (retarget cadence, halving
-        // schedule, max supply, ...) this group's nodes build blocks under —
-        // see ConsensusRules' own comment in Blockchain.cs for why this
+        // Name of an entry in the scenario file's top-level NodeRules list —
+        // the consensus/economics ruleset (retarget cadence, halving
+        // schedule, max supply, ...) this group's nodes build blocks under.
+        // See ConsensusRules' own comment in Blockchain.cs for why this
         // lives per-group (and, ultimately, per-block) rather than as a
         // single scenario-wide setting: each block carries its builder's
         // rules with it, so different groups genuinely can follow different
         // rules within the same run/network, and ValidateChain checks each
-        // block purely against what IT declares. Defaults to real Bitcoin's
-        // own numbers (ConsensusRules' own field defaults), except
-        // InitialDifficultyShift (see its comment in Blockchain.cs for why
-        // that one deliberately isn't).
-        public ConsensusRules Rules { get; set; } = new();
+        // block purely against what IT declares. Null/omitted means
+        // ConsensusRules' own field defaults (real Bitcoin's own numbers,
+        // except InitialDifficultyShift — see its comment in Blockchain.cs
+        // for why that one deliberately isn't). Referencing a name that
+        // isn't defined in NodeRules is a scenario-authoring mistake (logged
+        // as a warning by ScenarioLoader.LoadAsync, then treated the same as
+        // null).
+        public string? RulesName { get; set; } = null;
+
+        // Populated by ScenarioLoader.LoadAsync's resolution pass, from
+        // RulesName looked up against the scenario file's NodeRules list —
+        // never itself part of the YAML shape (deliberately not named
+        // "Rules": an old-style inline Rules block left over in a
+        // not-yet-migrated file would otherwise deserialize straight into a
+        // same-named property here, silently bypassing RulesName resolution
+        // entirely instead of just being dropped by IgnoreUnmatchedProperties
+        // like any other stale field). This is what NodeNetwork.AddNodeAsync
+        // actually reads.
+        public ConsensusRules ResolvedRules { get; set; } = new();
     }
 
     public static class ScenarioLoader
@@ -182,12 +225,16 @@ namespace BitcoinNetworkSimulator
         // normally), the file is empty/parses to no phases, or it fails to
         // parse (all logged, then treated the same as absent, so a typo'd
         // scenario file can't crash startup). A scenario file is a YAML
-        // list of phases — see the comment atop Scenario — not a single
-        // mapping; a bare top-level mapping is a common enough mistake
-        // (e.g. a single-phase file missing its leading `- `) to detect and
-        // call out specifically rather than surfacing YamlDotNet's generic
-        // deserialization error for it.
-        public static async Task<List<Scenario>?> LoadAsync(string path)
+        // mapping with a top-level Phases key (and, optionally, NodeRules)
+        // — see ScenarioFile — not a bare list; a bare top-level list is
+        // what pre-NodeRules scenario files looked like, common enough as a
+        // migration mistake to detect and call out specifically rather than
+        // surfacing YamlDotNet's generic deserialization error for it.
+        //
+        // Also resolves every NodeGroup's RulesName against NodeRules
+        // before returning (see ScenarioNodeGroup.ResolvedRules), so nothing
+        // downstream ever has to do that lookup itself.
+        public static async Task<ScenarioFile?> LoadAsync(string path)
         {
             if (!File.Exists(path)) return null;
 
@@ -195,24 +242,70 @@ namespace BitcoinNetworkSimulator
             {
                 var yaml = await File.ReadAllTextAsync(path);
 
-                if (Deserializer.Deserialize<object?>(yaml) is IDictionary<object, object>)
+                if (Deserializer.Deserialize<object?>(yaml) is List<object>)
                 {
-                    Console.WriteLine($"[scenario] {path} is a single YAML mapping, but a scenario file must be a list of phases — prefix it with '- '; ignoring, starting normally");
+                    Console.WriteLine($"[scenario] {path} is a bare list of phases, but a scenario file must be a mapping with a top-level 'Phases:' key (see \"Scenarios\" in README.md); ignoring, starting normally");
                     return null;
                 }
 
-                var phases = Deserializer.Deserialize<List<Scenario>>(yaml);
-                if (phases == null || phases.Count == 0)
+                var scenarioFile = Deserializer.Deserialize<ScenarioFile>(yaml);
+                if (scenarioFile == null || scenarioFile.Phases.Count == 0)
                 {
                     Console.WriteLine($"[scenario] {path} parsed to no phases; ignoring, starting normally");
                     return null;
                 }
-                return phases;
+
+                ResolveNodeRules(path, scenarioFile);
+                return scenarioFile;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[scenario] failed to read {path}: {ex.Message}; ignoring, starting normally");
                 return null;
+            }
+        }
+
+        // Builds a Name -> ConsensusRules lookup from scenarioFile.NodeRules
+        // (last one wins on a duplicate Name, logged), then resolves every
+        // phase's every NodeGroup.RulesName against it into ResolvedRules.
+        // A null RulesName or one that isn't defined in NodeRules both
+        // resolve to a plain `new ConsensusRules()` (real Bitcoin's own
+        // defaults) — the latter is a scenario-authoring mistake, so it's
+        // logged rather than silently treated the same as intentionally
+        // omitting a name.
+        private static void ResolveNodeRules(string path, ScenarioFile scenarioFile)
+        {
+            var byName = new Dictionary<string, ConsensusRules>();
+            foreach (var rules in scenarioFile.NodeRules)
+            {
+                if (string.IsNullOrWhiteSpace(rules.Name))
+                {
+                    Console.WriteLine($"[scenario] {path} has a NodeRules entry with no Name; ignoring it");
+                    continue;
+                }
+                if (byName.ContainsKey(rules.Name))
+                    Console.WriteLine($"[scenario] {path} defines NodeRules '{rules.Name}' more than once; the last one wins");
+                byName[rules.Name] = rules;
+            }
+
+            foreach (var phase in scenarioFile.Phases)
+            {
+                foreach (var group in phase.NodeGroups)
+                {
+                    if (group.RulesName == null)
+                    {
+                        group.ResolvedRules = new ConsensusRules();
+                    }
+                    else if (byName.TryGetValue(group.RulesName, out var rules))
+                    {
+                        group.ResolvedRules = rules;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[scenario] {path} has a NodeGroup with RulesName '{group.RulesName}', which isn't defined in NodeRules; using defaults");
+                        group.ResolvedRules = new ConsensusRules();
+                    }
+                }
             }
         }
 
@@ -233,16 +326,16 @@ namespace BitcoinNetworkSimulator
         // happened and exactly what configuration produced it — no need to
         // go find Scenarios/whatever.yaml separately, which may have since
         // been edited or deleted. See "Scenarios" in README.md.
-        public static string DetermineRunRootDir(string scenarioPath, List<Scenario>? phases)
+        public static string DetermineRunRootDir(string scenarioPath, ScenarioFile? scenarioFile)
         {
             var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmssfff");
-            var label = phases != null
+            var label = scenarioFile != null
                 ? SanitizeForFileName(Path.GetFileNameWithoutExtension(scenarioPath))
                 : "no-scenario";
             var dir = Path.Combine(AppContext.BaseDirectory, "ScenarioResults", $"{timestamp}-{label}");
             Directory.CreateDirectory(dir);
 
-            if (phases != null)
+            if (scenarioFile != null)
             {
                 try
                 {

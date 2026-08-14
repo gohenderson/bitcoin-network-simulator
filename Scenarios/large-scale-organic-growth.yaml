@@ -1,30 +1,29 @@
 # yaml-language-server: $schema=./scenario.schema.json
-- Description: >-
-    Starts at a single node and lets organic growth run unrestricted (roughly doubling every
-    GrowthIntervalSeconds) for the full duration, capped at MaxNodes. Demonstrates
-    NodeGrowthLoopAsync's exponential curve at scale, with a fixed, reviewable result folder
-    instead of running forever.
-  DurationSeconds: 900
-  AutoGrowth: true
-  GrowthIntervalSeconds: 8
-  MaxNodes: 100
-  NodeGroups:
-  - Count: 1
-    Role: Honest
-    HashPower: 1
-    CanMine: true
-    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-    # explicit here for clarity. Nodes organic growth adds later aren't
-    # NodeGroups-authored, so they get ConsensusRules' own defaults — the
-    # same real-Bitcoin numbers as below, so every node in this run shares
-    # one ruleset regardless of how it joined. See README.md's "Scenarios"
-    # section for the per-NodeGroup Rules model.
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
+NodeRules:
+  # Real Bitcoin's own numbers — see README.md's "Scenarios" section.
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      Starts at a single node and lets organic growth run unrestricted (roughly doubling every
+      GrowthIntervalSeconds) for the full duration, capped at MaxNodes. Demonstrates
+      NodeGrowthLoopAsync's exponential curve at scale, with a fixed, reviewable result folder
+      instead of running forever.
+    DurationSeconds: 900
+    AutoGrowth: true
+    GrowthIntervalSeconds: 8
+    MaxNodes: 100
+    NodeGroups:
+    - Count: 1
+      Role: Honest
+      HashPower: 1
+      CanMine: true
+      RulesName: real-bitcoin

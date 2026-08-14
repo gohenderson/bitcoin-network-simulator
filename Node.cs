@@ -523,7 +523,7 @@ namespace BitcoinNetworkSimulator
             metadata.CanMine = group.CanMine;
             metadata.Pool = group.Pool;
             metadata.EconomicWeight = group.EconomicWeight;
-            metadata.Rules = group.Rules;
+            metadata.Rules = group.ResolvedRules;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

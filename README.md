@@ -140,51 +140,56 @@ unknown node id gets a 404 before the request ever reaches a node.
 
 ## Scenarios
 
-A scenario file is a YAML **list of phases**, applied in order, instead of
-hand-editing `metadata.json` files after the fact. Phase 0's settings and
-`NodeGroups` take effect immediately; each later phase's settings and
-`NodeGroups` take over once the previous phase's `DurationSeconds` elapses —
-so a single run can model a network changing over time (e.g. a slow-growth
-early era, then a pool-dominated high-growth one, then a mature era with
-churn) instead of being fixed for its whole duration. A field a phase leaves
-out inherits whatever the previous phase had in effect (or the built-in
-default, for phase 0) — a phase only needs to state what's actually
-changing. YAML comments (`#`) are fair game for narrating *why* a phase is
-shaped the way it is. See [`Scenario.cs`](Scenario.cs) for the full
-field-by-field format. Single-phase example (a plain list of one):
+A scenario file is a YAML mapping with a top-level **`Phases`** list and an
+optional top-level **`NodeRules`** list. `Phases` is the run's timeline,
+applied in order: phase 0's settings and `NodeGroups` take effect
+immediately; each later phase's settings and `NodeGroups` take over once
+the previous phase's `DurationSeconds` elapses — so a single run can model
+a network changing over time (e.g. a slow-growth early era, then a
+pool-dominated high-growth one, then a mature era with churn) instead of
+being fixed for its whole duration. A field a phase leaves out inherits
+whatever the previous phase had in effect (or the built-in default, for
+phase 0) — a phase only needs to state what's actually changing. YAML
+comments (`#`) are fair game for narrating *why* a phase is shaped the way
+it is. See [`Scenario.cs`](Scenario.cs) for the full field-by-field format.
+Single-phase example:
 
 ```yaml
-- Description: 15 nodes, fixed: 10 plain solo miners plus a 5-member pool.
-  DurationSeconds: 900
-  AutoGrowth: false
-  NodeGroups:
-    - { Count: 10, Role: Honest, HashPower: 1, CanMine: true }
-    - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
+Phases:
+  - Description: 15 nodes, fixed: 10 plain solo miners plus a 5-member pool.
+    DurationSeconds: 900
+    AutoGrowth: false
+    NodeGroups:
+      - { Count: 10, Role: Honest, HashPower: 1, CanMine: true }
+      - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
 ```
 
-Every `NodeGroups` entry also accepts a `Rules` block — the consensus/
-economics ruleset (retarget cadence, halving schedule, max supply, ...)
-that group's nodes build blocks under. Omitted, it defaults to real
-Bitcoin's own numbers (see [Per-NodeGroup fields](#scenarios) below); set
-explicitly, different groups can genuinely follow *different* rules within
-the same network, since every block carries its own builder's rules with
-it rather than everyone being forced to share one value:
+`NodeRules` is a named library of consensus/economics rulesets (retarget
+cadence, halving schedule, max supply, ...) that `NodeGroups` entries point
+to by name via `RulesName`, instead of every group that happens to share
+one repeating the same block. Omitted, a group's `RulesName` defaults to
+real Bitcoin's own numbers (see [Per-NodeGroup fields](#scenarios) below);
+pointed at different named rules, different groups can genuinely follow
+*different* rules within the same network, since every block carries its
+own builder's rules with it rather than everyone being forced to share one
+value:
 
 ```yaml
-- Description: A slower, more conservative pool alongside a faster one.
-  DurationSeconds: 900
-  AutoGrowth: false
-  NodeGroups:
-    - Count: 5
-      Role: Honest
-      HashPower: 10
-      Pool: conservative
-      Rules: { HalvingIntervalBlocks: 210000, MaxSupply: 21000000 }
-    - Count: 5
-      Role: Honest
-      HashPower: 10
-      Pool: aggressive
-      Rules: { HalvingIntervalBlocks: 2100, MaxSupply: 210000 }
+NodeRules:
+  - Name: conservative
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+  - Name: aggressive
+    HalvingIntervalBlocks: 2100
+    MaxSupply: 210000
+
+Phases:
+  - Description: A slower, more conservative pool alongside a faster one.
+    DurationSeconds: 900
+    AutoGrowth: false
+    NodeGroups:
+      - { Count: 5, Role: Honest, HashPower: 10, Pool: conservative, RulesName: conservative }
+      - { Count: 5, Role: Honest, HashPower: 10, Pool: aggressive, RulesName: aggressive }
 ```
 
 A `Description` longer than a line or two reads better as a folded block
@@ -205,34 +210,35 @@ Multi-phase example — a slow genesis era, then pools emerge, then growth
 stops and nodes start churning, running indefinitely once fully mature:
 
 ```yaml
-# Genesis era: one node, no growth yet.
-- Description: Genesis era
-  DurationSeconds: 300
-  AutoGrowth: false
-  NodeGroups:
-    - { Count: 1, Role: Honest, HashPower: 1, CanMine: true }
+Phases:
+  # Genesis era: one node, no growth yet.
+  - Description: Genesis era
+    DurationSeconds: 300
+    AutoGrowth: false
+    NodeGroups:
+      - { Count: 1, Role: Honest, HashPower: 1, CanMine: true }
 
-# Early growth: organic growth turns on.
-- Description: Early growth
-  DurationSeconds: 600
-  AutoGrowth: true
-  GrowthIntervalSeconds: 8
-  GrowthRate: 2.0
-  MaxNodes: 50
+  # Early growth: organic growth turns on.
+  - Description: Early growth
+    DurationSeconds: 600
+    AutoGrowth: true
+    GrowthIntervalSeconds: 8
+    GrowthRate: 2.0
+    MaxNodes: 50
 
-# Pools emerge: a mining pool joins mid-run, growth slows.
-- Description: Pools emerge
-  DurationSeconds: 600
-  GrowthRate: 1.2
-  NodeGroups:
-    - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
+  # Pools emerge: a mining pool joins mid-run, growth slows.
+  - Description: Pools emerge
+    DurationSeconds: 600
+    GrowthRate: 1.2
+    NodeGroups:
+      - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
 
-# Mature network: growth stops, nodes start churning, runs until Enter.
-- Description: Mature network
-  AutoGrowth: false
-  ChurnIntervalSeconds: 30
-  ChurnRate: 0.05
-  ChurnMinNodes: 20
+  # Mature network: growth stops, nodes start churning, runs until Enter.
+  - Description: Mature network
+    AutoGrowth: false
+    ChurnIntervalSeconds: 30
+    ChurnRate: 0.05
+    ChurnMinNodes: 20
 ```
 
 **Editor autocomplete.** [`Scenarios/scenario.schema.json`](Scenarios/scenario.schema.json)
@@ -248,17 +254,18 @@ Each file in `Scenarios/` opts in via a leading modeline comment:
 
 A new scenario file needs that same line (adjust the relative path if it
 lives outside `Scenarios/`) to get the same autocomplete and inline
-validation — e.g. a typo'd field name or an invalid `Role` value gets
+validation — e.g. a typo'd field name, an invalid `Role` value, or a bare
+top-level list left over from before `Phases`/`NodeRules` existed gets
 flagged in the editor before the file is ever run.
 
-Per-phase fields:
+Per-phase fields (inside `Phases`):
 
 - `NodeGroups` — nodes to add when this phase begins, applied in order (see [Per-NodeGroup fields](#scenarios) below for each group's own fields), added on top of whatever already exists from earlier phases. Empty/omitted on phase 0 specifically falls back to the normal single-node default start; empty/omitted on any later phase just means no explicit nodes that phase.
 - `AutoGrowth` (default `true`) — whether the network keeps growing organically on top of `NodeGroups`.
 - `GrowthIntervalSeconds` / `GrowthRate` / `MaxNodes` — override organic growth's pace/rate/cap. `GrowthRate` is a multiplier on the current node count applied each tick (default `2.0`, doubling; `1.5` adds 50% per tick).
 - `GrowthJitterSeconds` — random +/- range applied to `GrowthIntervalSeconds` each tick, so growth doesn't land on a perfectly regular schedule (default `0`, no jitter).
 - `GrowthMinSeedNodes` — floor the network tops up to, one node per tick, before `GrowthRate` scaling takes over (default `0`, no floor — rate scaling applies from the first tick).
-- `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling. Organically-grown nodes also get `ConsensusRules`' own defaults (real Bitcoin's numbers) for their `Rules`, same as a `NodeGroups` entry that omits it.
+- `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling. Organically-grown nodes also get `ConsensusRules`' own defaults (real Bitcoin's numbers), same as a `NodeGroups` entry with no `RulesName`.
 - `ChurnIntervalSeconds` / `ChurnRate` / `ChurnMinNodes` — nodes leaving the live network, growth's counterpart. `ChurnRate` is the fraction of the current node count removed each tick (default `0`, disabled); `ChurnMinNodes` is a floor churn won't shrink below (default `1`). Independent of `AutoGrowth` — can run growth and churn together, or churn alone on a fixed population.
 - `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
 - `DurationSeconds` — how long this phase lasts before the next one takes over (Enter still works too, to stop the whole run early). On the *last* phase, this instead means how long the whole run lasts before automatically shutting down; omitted there means no automatic stop. Omitted on any earlier phase means that phase — and therefore the run — never advances past it, so every non-last phase should set this.
@@ -271,16 +278,18 @@ Per-NodeGroup fields:
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
-- `Rules` — the consensus/economics ruleset (below) this group's nodes build blocks under. Omitted, every field within it defaults.
+- `RulesName` — name of an entry in the scenario file's top-level `NodeRules` list (below); the consensus/economics ruleset this group's nodes build blocks under. Omitted (or a name not defined in `NodeRules`, logged as a warning) means every field below defaults.
 
-`Rules` fields — **unlike every field above, these live on the block itself**,
-not just the node: a mining node stamps its own configured `Rules` onto
-every block it builds, and any peer validates that block purely against
-the rules it declares for itself, not some single value every node is
-forced to share (see [What this is not](#what-this-is-not)). All default to
-real Bitcoin's own numbers except `InitialDifficultyShift`, which
-deliberately can't be:
+`NodeRules` — a top-level list of named rulesets, each `{ Name, ...the 8
+fields below }`. **Unlike every field above, these live on the block
+itself**, not just the node: a mining node stamps its own `RulesName`'s
+resolved fields onto every block it builds, and any peer validates that
+block purely against the rules it declares for itself, not some single
+value every node is forced to share (see [What this is
+not](#what-this-is-not)). All default to real Bitcoin's own numbers except
+`InitialDifficultyShift`, which deliberately can't be:
 
+- `Name` — how a `NodeGroups` entry's `RulesName` refers to this entry. Keep unique — a duplicate `Name` is a scenario-authoring mistake (the last one silently wins).
 - `RetargetIntervalBlocks` / `TargetSecondsPerBlock` — how often (in blocks) difficulty retargets, and how long a block "should" take on average. Default `2016` / `600` (10 minutes).
 - `MinAdjustmentFactor` / `MaxAdjustmentFactor` — clamp on how much a single retarget can swing the target. Default `0.25` / `4.0` (already real Bitcoin's own clamp).
 - `InitialDifficultyShift` — starting difficulty (higher = harder). Default `8` — see [What this is not](#what-this-is-not) for why this one stays simulation-scaled.
@@ -406,9 +415,9 @@ reconstructing reports or charting a run's progression over time.
   in for whatever a real network would use (a genesis validator list, an
   on-chain registration transaction, a PKI).
 - **"Consensus" here really means self-consistency, not network-wide
-  agreement.** Every block carries its own builder's `Rules` (retarget
+  agreement.** Every block carries its own builder's rules (retarget
   cadence, halving schedule, max supply, ...) — see `ConsensusRules` in
-  `Blockchain.cs` and [Scenarios](#scenarios)' per-NodeGroup `Rules` — and
+  `Blockchain.cs` and [Scenarios](#scenarios)' `NodeRules`/`RulesName` — and
   `ValidateChain` checks a block purely against what IT declares for
   itself. That means a node genuinely can build valid-by-its-own-rules
   blocks under an arbitrary policy (a tiny halving interval, an enormous

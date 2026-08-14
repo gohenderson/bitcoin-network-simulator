@@ -1,43 +1,36 @@
 # yaml-language-server: $schema=./scenario.schema.json
-- Description: >-
-    30 nodes, fixed: 3 high-EconomicWeight 'hub' nodes joined first, among 27 ordinary ones,
-    each node keeping only 4 outbound peers (real Bitcoin's default is 8). Demonstrates PEER
-    TOPOLOGY: the hubs accumulate far more inbound connections than an ordinary node purely
-    because every later-joining node's weighted peer picks favor them, so blocks tend to
-    relay through the hubs hop by hop rather than every node talking directly to every other
-    node.
-  DurationSeconds: 600
-  AutoGrowth: false
-  OutboundPeerCount: 4
-  NodeGroups:
-  - Count: 3
-    Role: Honest
-    HashPower: 1
-    CanMine: true
-    EconomicWeight: 50
-    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-    # explicit here for clarity. Every block carries its builder's rules
-    # with it, so different NodeGroups genuinely can follow different
-    # rules within the same network — see README.md's "Scenarios" section.
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
-  - Count: 27
-    Role: Honest
-    HashPower: 1
-    CanMine: true
-    Rules:
-      RetargetIntervalBlocks: 2016
-      TargetSecondsPerBlock: 600
-      MinAdjustmentFactor: 0.25
-      MaxAdjustmentFactor: 4
-      InitialDifficultyShift: 8
-      InitialBlockReward: 50
-      HalvingIntervalBlocks: 210000
-      MaxSupply: 21000000
+NodeRules:
+  # Real Bitcoin's own numbers — see README.md's "Scenarios" section.
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      30 nodes, fixed: 3 high-EconomicWeight 'hub' nodes joined first, among 27 ordinary ones,
+      each node keeping only 4 outbound peers (real Bitcoin's default is 8). Demonstrates PEER
+      TOPOLOGY: the hubs accumulate far more inbound connections than an ordinary node purely
+      because every later-joining node's weighted peer picks favor them, so blocks tend to
+      relay through the hubs hop by hop rather than every node talking directly to every other
+      node.
+    DurationSeconds: 600
+    AutoGrowth: false
+    OutboundPeerCount: 4
+    NodeGroups:
+    - Count: 3
+      Role: Honest
+      HashPower: 1
+      CanMine: true
+      EconomicWeight: 50
+      RulesName: real-bitcoin
+    - Count: 27
+      Role: Honest
+      HashPower: 1
+      CanMine: true
+      RulesName: real-bitcoin
