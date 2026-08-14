@@ -12,31 +12,68 @@
     Role: Honest
     HashPower: 10
     CanMine: true
+    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
+    # explicit here for clarity. Every block carries its builder's rules
+    # with it, so different NodeGroups genuinely can follow different
+    # rules within the same network — see README.md's "Scenarios" section.
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000
   - Count: 1
     Role: Equivocator
     HashPower: 10
     CanMine: true
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000
   - Count: 1
     Role: Impersonator
     HashPower: 10
     CanMine: true
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000
   - Count: 1
     Role: Corruptor
     HashPower: 10
     CanMine: true
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000
   - Count: 1
     Role: Withholder
     HashPower: 10
     CanMine: true
-
-  # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-  # explicit here for clarity (phase-0-only; see README.md's "Scenarios"
-  # section for why these do not vary phase to phase).
-  RetargetIntervalBlocks: 2016
-  TargetSecondsPerBlock: 600
-  MinAdjustmentFactor: 0.25
-  MaxAdjustmentFactor: 4
-  InitialDifficultyShift: 8
-  InitialBlockReward: 50
-  HalvingIntervalBlocks: 210000
-  MaxSupply: 21000000
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000

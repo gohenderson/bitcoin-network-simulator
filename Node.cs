@@ -372,6 +372,15 @@ namespace BitcoinNetworkSimulator
         // ordinary node does, without any special protocol role. See the
         // "Peer topology" note in README.md.
         public int EconomicWeight { get; set; } = 1;
+        // The consensus/economics ruleset this node builds blocks under —
+        // see ConsensusRules' own comment in Blockchain.cs. Sourced from
+        // whichever ScenarioNodeGroup created this node (NodeGroups-authored
+        // nodes only — see LoadOrCreateFromGroupAsync); organically-grown
+        // and default-start nodes just get ConsensusRules' own defaults
+        // (real Bitcoin's own numbers). Persisted here so a restart's
+        // SoloMiner stamps the exact same rules it always has, not whatever
+        // this run's scenario happens to say now.
+        public ConsensusRules Rules { get; set; } = new();
         // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
         // — see the "Signed blocks" note in README.md. Unlike every other
         // field here, this one should never be hand-edited or deleted once a
@@ -514,6 +523,7 @@ namespace BitcoinNetworkSimulator
             metadata.CanMine = group.CanMine;
             metadata.Pool = group.Pool;
             metadata.EconomicWeight = group.EconomicWeight;
+            metadata.Rules = group.Rules;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

@@ -121,31 +121,6 @@ namespace BitcoinNetworkSimulator
         // for phase 0 — mining needs at least one node to make progress).
         public int? ChurnMinNodes { get; set; }
 
-        // ------------------------------------------------------------------
-        // Consensus economics/proof-of-work — UNLIKE every field above, these
-        // are NOT per-phase and NOT inherited: every node uses
-        // ProofOfWork.ComputeExpectedTargetHex / Economics.ComputeBlockReward
-        // to independently re-derive the expected target/reward for EVERY
-        // block, including historical ones, purely from a block's height and
-        // these process-wide values — so changing one mid-run would make
-        // already-mined blocks fail re-validation for any node that sees the
-        // new value applied retroactively. Program resolves these ONCE, from
-        // phase 0 only; setting any of them on a later phase is a
-        // scenario-authoring mistake (logged as a warning, then ignored).
-        // Null means the corresponding ProofOfWork/Economics Default*
-        // constant — real Bitcoin's own numbers, except InitialDifficultyShift
-        // (see its comment in Blockchain.cs for why that one deliberately
-        // isn't).
-        // ------------------------------------------------------------------
-        public int? RetargetIntervalBlocks { get; set; }
-        public double? TargetSecondsPerBlock { get; set; }
-        public double? MinAdjustmentFactor { get; set; }
-        public double? MaxAdjustmentFactor { get; set; }
-        public int? InitialDifficultyShift { get; set; }
-        public decimal? InitialBlockReward { get; set; }
-        public int? HalvingIntervalBlocks { get; set; }
-        public decimal? MaxSupply { get; set; }
-
         // Each entry describes Count identically-configured nodes to add
         // when this phase begins, applied in the order listed and added on
         // top of whatever nodes already exist from earlier phases — e.g. a
@@ -176,6 +151,18 @@ namespace BitcoinNetworkSimulator
         // nodes proportionally more likely to be picked as another node's
         // outbound peer, turning them into structural hubs.
         public int EconomicWeight { get; set; } = 1;
+        // The consensus/economics ruleset (retarget cadence, halving
+        // schedule, max supply, ...) this group's nodes build blocks under —
+        // see ConsensusRules' own comment in Blockchain.cs for why this
+        // lives per-group (and, ultimately, per-block) rather than as a
+        // single scenario-wide setting: each block carries its builder's
+        // rules with it, so different groups genuinely can follow different
+        // rules within the same run/network, and ValidateChain checks each
+        // block purely against what IT declares. Defaults to real Bitcoin's
+        // own numbers (ConsensusRules' own field defaults), except
+        // InitialDifficultyShift (see its comment in Blockchain.cs for why
+        // that one deliberately isn't).
+        public ConsensusRules Rules { get; set; } = new();
     }
 
     public static class ScenarioLoader

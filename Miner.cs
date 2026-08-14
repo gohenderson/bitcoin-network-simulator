@@ -52,6 +52,12 @@ namespace BitcoinNetworkSimulator
 
         private readonly int _serverPort;
         private readonly NodeRole _role;
+        // The consensus/economics ruleset this node builds blocks under —
+        // see ConsensusRules' own comment in Blockchain.cs. Sourced from
+        // NodeMetadata.Rules at construction; every block this SoloMiner
+        // mines (solo, pooled, or either half of an Equivocator's pair) gets
+        // stamped with this same ruleset.
+        private readonly ConsensusRules _rules;
         private readonly Blockchain _chain;
         private readonly ConcurrentQueue<Transaction> _mempool;
         private readonly Func<List<string>> _getPeerIds;
@@ -63,13 +69,14 @@ namespace BitcoinNetworkSimulator
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, ConsensusRules rules, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
             _serverPort = serverPort;
             _role = role;
             HashPower = Math.Max(1, hashPower);
+            _rules = rules;
             _chain = chain;
             _mempool = mempool;
             _getPeerIds = getPeerIds;
@@ -144,6 +151,7 @@ namespace BitcoinNetworkSimulator
                 BuiltBy = builtByLabel,
                 Transactions = txs,
                 Target = expectedTargetHex,
+                Rules = _rules,
                 Timestamp = DateTime.UtcNow
             };
 
@@ -194,9 +202,9 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height);
+            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
@@ -295,9 +303,9 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height);
+            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
@@ -361,9 +369,9 @@ namespace BitcoinNetworkSimulator
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
-            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors);
+            var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, _rules);
             var height = parent.Index + 1;
-            var reward = Economics.ComputeBlockReward(ancestors, height);
+            var reward = Economics.ComputeBlockReward(ancestors, height, _rules);
 
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);

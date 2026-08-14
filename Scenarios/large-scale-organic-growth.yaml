@@ -13,15 +13,18 @@
     Role: Honest
     HashPower: 1
     CanMine: true
-
-  # Consensus economics/proof-of-work — real Bitcoin's own numbers,
-  # explicit here for clarity (phase-0-only; see README.md's "Scenarios"
-  # section for why these do not vary phase to phase).
-  RetargetIntervalBlocks: 2016
-  TargetSecondsPerBlock: 600
-  MinAdjustmentFactor: 0.25
-  MaxAdjustmentFactor: 4
-  InitialDifficultyShift: 8
-  InitialBlockReward: 50
-  HalvingIntervalBlocks: 210000
-  MaxSupply: 21000000
+    # Consensus economics/proof-of-work — real Bitcoin's own numbers,
+    # explicit here for clarity. Nodes organic growth adds later aren't
+    # NodeGroups-authored, so they get ConsensusRules' own defaults — the
+    # same real-Bitcoin numbers as below, so every node in this run shares
+    # one ruleset regardless of how it joined. See README.md's "Scenarios"
+    # section for the per-NodeGroup Rules model.
+    Rules:
+      RetargetIntervalBlocks: 2016
+      TargetSecondsPerBlock: 600
+      MinAdjustmentFactor: 0.25
+      MaxAdjustmentFactor: 4
+      InitialDifficultyShift: 8
+      InitialBlockReward: 50
+      HalvingIntervalBlocks: 210000
+      MaxSupply: 21000000

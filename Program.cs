@@ -77,45 +77,6 @@ namespace BitcoinNetworkSimulator
             };
         }
 
-        // Consensus economics/proof-of-work — unlike GrowthSettings above,
-        // NOT per-phase: every node re-derives the expected target/reward for
-        // every block, including historical ones, purely from a block's
-        // height and these process-wide ProofOfWork/Economics values, so
-        // changing one mid-run would make already-mined blocks fail
-        // re-validation — see the comment on Scenario's fields for these.
-        // Resolved once, here, from phase 0 only, before anything (the
-        // genesis block included) reads them; any later phase setting one is
-        // flagged as a likely authoring mistake rather than silently ignored.
-        private static void ApplyConsensusSettings(List<Scenario> phases)
-        {
-            var phase0 = phases[0];
-            ProofOfWork.RetargetIntervalBlocks = phase0.RetargetIntervalBlocks ?? ProofOfWork.DefaultRetargetIntervalBlocks;
-            ProofOfWork.TargetSecondsPerBlock = phase0.TargetSecondsPerBlock ?? ProofOfWork.DefaultTargetSecondsPerBlock;
-            ProofOfWork.MinAdjustmentFactor = phase0.MinAdjustmentFactor ?? ProofOfWork.DefaultMinAdjustmentFactor;
-            ProofOfWork.MaxAdjustmentFactor = phase0.MaxAdjustmentFactor ?? ProofOfWork.DefaultMaxAdjustmentFactor;
-            ProofOfWork.InitialDifficultyShift = phase0.InitialDifficultyShift ?? ProofOfWork.DefaultInitialDifficultyShift;
-            Economics.InitialBlockReward = phase0.InitialBlockReward ?? Economics.DefaultInitialBlockReward;
-            Economics.HalvingIntervalBlocks = phase0.HalvingIntervalBlocks ?? Economics.DefaultHalvingIntervalBlocks;
-            Economics.MaxSupply = phase0.MaxSupply ?? Economics.DefaultMaxSupply;
-
-            for (var i = 1; i < phases.Count; i++)
-            {
-                var phase = phases[i];
-                var ignored = new List<string>();
-                if (phase.RetargetIntervalBlocks != null) ignored.Add(nameof(Scenario.RetargetIntervalBlocks));
-                if (phase.TargetSecondsPerBlock != null) ignored.Add(nameof(Scenario.TargetSecondsPerBlock));
-                if (phase.MinAdjustmentFactor != null) ignored.Add(nameof(Scenario.MinAdjustmentFactor));
-                if (phase.MaxAdjustmentFactor != null) ignored.Add(nameof(Scenario.MaxAdjustmentFactor));
-                if (phase.InitialDifficultyShift != null) ignored.Add(nameof(Scenario.InitialDifficultyShift));
-                if (phase.InitialBlockReward != null) ignored.Add(nameof(Scenario.InitialBlockReward));
-                if (phase.HalvingIntervalBlocks != null) ignored.Add(nameof(Scenario.HalvingIntervalBlocks));
-                if (phase.MaxSupply != null) ignored.Add(nameof(Scenario.MaxSupply));
-
-                if (ignored.Count > 0)
-                    Console.WriteLine($"[scenario] phase {i + 1}/{phases.Count} sets {string.Join(", ", ignored)} — ignored: consensus economics/proof-of-work only take effect from phase 0, since changing them mid-run would make already-mined blocks fail re-validation.");
-            }
-        }
-
         public static async Task Main(string[] args)
         {
             Console.WriteLine("=== BitcoinNetworkSimulator ===");
@@ -131,7 +92,6 @@ namespace BitcoinNetworkSimulator
             var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.yaml");
             var loadedPhases = await ScenarioLoader.LoadAsync(scenarioPath);
             var phases = loadedPhases ?? new List<Scenario> { new Scenario() };
-            ApplyConsensusSettings(phases);
 
             // Every run's node folders and watcher.db land under
             // their own timestamped ScenarioResults/

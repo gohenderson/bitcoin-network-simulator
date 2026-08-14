@@ -50,9 +50,20 @@ namespace BitcoinNetworkSimulator
         public string Target { get; set; } = "";
         public long Nonce { get; set; }
 
+        // The consensus/economics ruleset this block's builder claims to have
+        // followed — see ConsensusRules' own comment for the full picture.
+        // Part of the hashed payload below, same as Target/Nonce, so
+        // declaring one ruleset and then validating against another isn't
+        // possible without also breaking the hash.
+        public ConsensusRules Rules { get; set; } = new();
+
         public string ComputeHash()
         {
             var payload = $"{Index}|{Timestamp:O}|{PreviousHash}|{BuiltBy}|{Target}|{Nonce}|" +
+                          $"{Rules.RetargetIntervalBlocks}|{Rules.TargetSecondsPerBlock.ToString(CultureInfo.InvariantCulture)}|" +
+                          $"{Rules.MinAdjustmentFactor.ToString(CultureInfo.InvariantCulture)}|{Rules.MaxAdjustmentFactor.ToString(CultureInfo.InvariantCulture)}|" +
+                          $"{Rules.InitialDifficultyShift}|{Rules.InitialBlockReward.ToString(CultureInfo.InvariantCulture)}|" +
+                          $"{Rules.HalvingIntervalBlocks}|{Rules.MaxSupply.ToString(CultureInfo.InvariantCulture)}|" +
                           string.Join(",", Transactions.Select(t => $"{t.From}>{t.To}:{t.Amount}"));
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
         }
@@ -68,29 +79,18 @@ namespace BitcoinNetworkSimulator
 
     public static class ProofOfWork
     {
-        // How often (in blocks) to retarget, and how long a block "should" take
-        // on average. Default to real Bitcoin's own numbers (2016-block / ~2-week
-        // retarget window, 10-minute block target) — scenario-configurable via
-        // RetargetIntervalBlocks/TargetSecondsPerBlock (see "Scenarios" in
-        // README.md) for a faster-paced run. Consensus-critical: every node
-        // uses these same two values to independently recompute the SAME
-        // expected target for a given height, so they're fixed for the whole
-        // run (resolved once from phase 0, not phase-mutable like growth/churn
-        // — see the note atop Scenario.cs) rather than something that could
-        // drift node to node or block to block.
+        // Real Bitcoin's own numbers (2016-block / ~2-week retarget window,
+        // 10-minute block target) — the built-in defaults a ConsensusRules
+        // gets when nothing overrides them (see ConsensusRules below and
+        // ScenarioNodeGroup.Rules in Scenario.cs).
         public const int DefaultRetargetIntervalBlocks = 2016;
-        public static int RetargetIntervalBlocks = DefaultRetargetIntervalBlocks;
         public const double DefaultTargetSecondsPerBlock = 600.0;
-        public static double TargetSecondsPerBlock = DefaultTargetSecondsPerBlock;
 
-        // Bitcoin-style clamp so a single retarget can't swing wildly in either
-        // direction, even if the last interval's timing was a fluke — already
-        // real Bitcoin's own clamp, scenario-configurable via
-        // MinAdjustmentFactor/MaxAdjustmentFactor same as above.
+        // Bitcoin-style clamp so a single retarget can't swing wildly in
+        // either direction, even if the last interval's timing was a fluke —
+        // already real Bitcoin's own clamp.
         public const double DefaultMinAdjustmentFactor = 0.25;
-        public static double MinAdjustmentFactor = DefaultMinAdjustmentFactor;
         public const double DefaultMaxAdjustmentFactor = 4.0;
-        public static double MaxAdjustmentFactor = DefaultMaxAdjustmentFactor;
 
         // Higher = harder (lower per-attempt success probability, slower
         // blocks). Lower = easier. Deliberately NOT matched to real Bitcoin's
@@ -103,20 +103,15 @@ namespace BitcoinNetworkSimulator
         // still has a real, if modest, chance each turn, while a node with
         // HashPower 1000 succeeds on the vast majority of its turns — exactly
         // the "1000x more likely to win" effect simulated hash power is meant
-        // to produce. Scenario-configurable via InitialDifficultyShift, same
-        // fixed-for-the-whole-run rule as above — raising it combined with
-        // real RetargetIntervalBlocks/TargetSecondsPerBlock is itself a
+        // to produce. Raising it combined with real
+        // RetargetIntervalBlocks/TargetSecondsPerBlock is itself a
         // network-effect worth observing: retargeting on Bitcoin's real
         // cadence against hash power that isn't Bitcoin's real magnitude
         // pushes difficulty to keep climbing every interval, since blocks
         // keep arriving faster than the 10-minute goal expects.
         public const int DefaultInitialDifficultyShift = 8;
-        public static int InitialDifficultyShift = DefaultInitialDifficultyShift;
 
         public static readonly BigInteger MaxTarget = (BigInteger.One << 256) - 1;
-        // Computed, not cached at type-init, so setting InitialDifficultyShift
-        // from a scenario before this is first read takes effect.
-        public static BigInteger InitialTarget => MaxTarget >> InitialDifficultyShift;
 
         public static BigInteger HashToBigInteger(string hex)
         {
@@ -146,10 +141,17 @@ namespace BitcoinNetworkSimulator
         }
 
         // Deterministically derives the target the NEXT block (at height =
-        // ancestors.Count) must satisfy, purely from public chain history — no
-        // secret, nothing to trust, nothing to announce. Every node computes this
-        // identically, the same way every real Bitcoin node independently
-        // recomputes the same expected difficulty from block timestamps.
+        // ancestors.Count) must satisfy, purely from public chain history and
+        // `rules` — no secret, nothing to trust, nothing to announce. `rules`
+        // is the CANDIDATE block's own declared ConsensusRules (see the note
+        // atop that class for why this is a per-block value, not a global
+        // one): mining computes this using its own node's rules before
+        // stamping them onto the block it builds, and ValidateChain
+        // recomputes the identical thing using block.Rules — checking that a
+        // block correctly followed the rules IT claims to follow, the same
+        // way every real Bitcoin node independently recomputes the same
+        // expected difficulty from block timestamps under one shared,
+        // network-wide rule.
         //
         // Known quirk, left in deliberately rather than engineered around:
         // genesis has a fixed, hardcoded timestamp (see CreateGenesisBlock), so
@@ -159,21 +161,21 @@ namespace BitcoinNetworkSimulator
         // MaxAdjustmentFactor clamp (target gets 4x easier). Every retarget
         // after that behaves normally, based purely on real elapsed mining
         // time between real blocks.
-        public static string ComputeExpectedTargetHex(List<Block> ancestors)
+        public static string ComputeExpectedTargetHex(List<Block> ancestors, ConsensusRules rules)
         {
             if (ancestors == null || ancestors.Count == 0)
-                return TargetToHex(InitialTarget);
+                return TargetToHex(MaxTarget >> rules.InitialDifficultyShift);
 
             var nextHeight = ancestors.Count;
             var parent = ancestors[^1];
 
-            if (nextHeight < RetargetIntervalBlocks || nextHeight % RetargetIntervalBlocks != 0)
+            if (nextHeight < rules.RetargetIntervalBlocks || nextHeight % rules.RetargetIntervalBlocks != 0)
                 return parent.Target; // no adjustment due yet — inherit parent's target
 
-            var intervalStart = ancestors[nextHeight - RetargetIntervalBlocks];
+            var intervalStart = ancestors[nextHeight - rules.RetargetIntervalBlocks];
             var actualSeconds = Math.Max(1.0, (parent.Timestamp - intervalStart.Timestamp).TotalSeconds);
-            var expectedSeconds = RetargetIntervalBlocks * TargetSecondsPerBlock;
-            var ratio = Math.Clamp(actualSeconds / expectedSeconds, MinAdjustmentFactor, MaxAdjustmentFactor);
+            var expectedSeconds = rules.RetargetIntervalBlocks * rules.TargetSecondsPerBlock;
+            var ratio = Math.Clamp(actualSeconds / expectedSeconds, rules.MinAdjustmentFactor, rules.MaxAdjustmentFactor);
 
             var parentTarget = HashToBigInteger(parent.Target);
             var ratioMicros = (long)Math.Round(ratio * 1_000_000.0);
@@ -187,51 +189,80 @@ namespace BitcoinNetworkSimulator
     }
 
     // ------------------------------------------------------------------
+    // A block's own declared consensus/economics ruleset — see "Scenarios"
+    // in README.md's NodeGroup.Rules and "What this is not" for the full
+    // picture. Every block carries one (Block.Rules, included in
+    // ComputeHash's payload so tampering with it after mining breaks the
+    // hash): a mining node stamps ITS OWN configured rules (from its
+    // NodeMetadata.Rules, itself sourced from whichever ScenarioNodeGroup
+    // created it) onto every block it builds, and ValidateChain checks a
+    // block purely against the rules IT declares for itself — not some
+    // single network-wide value every node is forced to share. That means
+    // "consensus" here is really "self-consistency": a block is valid if its
+    // target/reward are exactly what its OWN declared rules say they should
+    // be, regardless of what any other node's rules are. Genesis is the one
+    // exception — it's a fixed, universal checkpoint every node hardcodes
+    // identically (see CreateGenesisBlock), so it always uses a plain
+    // `new ConsensusRules()` (i.e. these defaults) regardless of which
+    // NodeGroup created the node holding it.
+    // ------------------------------------------------------------------
+    public class ConsensusRules
+    {
+        public int RetargetIntervalBlocks { get; set; } = ProofOfWork.DefaultRetargetIntervalBlocks;
+        public double TargetSecondsPerBlock { get; set; } = ProofOfWork.DefaultTargetSecondsPerBlock;
+        public double MinAdjustmentFactor { get; set; } = ProofOfWork.DefaultMinAdjustmentFactor;
+        public double MaxAdjustmentFactor { get; set; } = ProofOfWork.DefaultMaxAdjustmentFactor;
+        public int InitialDifficultyShift { get; set; } = ProofOfWork.DefaultInitialDifficultyShift;
+        public decimal InitialBlockReward { get; set; } = Economics.DefaultInitialBlockReward;
+        public int HalvingIntervalBlocks { get; set; } = Economics.DefaultHalvingIntervalBlocks;
+        public decimal MaxSupply { get; set; } = Economics.DefaultMaxSupply;
+    }
+
+    // ------------------------------------------------------------------
     // Coin issuance: a coinbase transaction (From == CoinbaseSender) is how new
     // coins enter existence, exactly one per block, paid to whoever built it.
     // The nominal reward halves every HalvingIntervalBlocks, and the running
     // total ever minted across the whole chain is hard-capped at MaxSupply —
     // both computed the same deterministic way ProofOfWork.ComputeExpectedTargetHex
-    // computes its target: purely from public chain history, so every node
-    // independently verifies the SAME expected reward for any given block
-    // without trusting the builder's claim.
+    // computes its target: purely from public chain history plus a
+    // ConsensusRules (see that class's comment for why this is a per-block
+    // value passed in, not a global one every node shares).
     //
-    // ARITHMETIC NOTE, worth being upfront about: the defaults below are real
-    // Bitcoin's own constants, tuned so the reward series converges to
-    // exactly MaxSupply: HalvingIntervalBlocks * InitialBlockReward *
-    // (1 + 1/2 + 1/4 + ...) = 210,000 * 50 * 2 = 21,000,000 — so the cap
-    // actually binds (asymptotically) at these defaults, not just in theory.
-    // All three are scenario-configurable (see "Scenarios" in README.md) for
-    // a faster-paced run — e.g. halving every 210 blocks instead of 210,000
-    // reaches the same-shaped reward curve 1000x sooner, but then the series
-    // only converges to 210 * 50 * 2 = 21,000, so MaxSupply would need
-    // shrinking to match if you want the cap to actually bind again.
-    // Consensus-critical, same fixed-for-the-whole-run rule as
-    // ProofOfWork's RetargetIntervalBlocks/TargetSecondsPerBlock above.
+    // ARITHMETIC NOTE, worth being upfront about: the Default* constants
+    // below (ConsensusRules' own defaults) are real Bitcoin's own constants,
+    // tuned so the reward series converges to exactly MaxSupply:
+    // HalvingIntervalBlocks * InitialBlockReward * (1 + 1/2 + 1/4 + ...) =
+    // 210,000 * 50 * 2 = 21,000,000 — so the cap actually binds
+    // (asymptotically) at these defaults, not just in theory. A
+    // ScenarioNodeGroup can override all three (see "Scenarios" in
+    // README.md) for a faster-paced run — e.g. halving every 210 blocks
+    // instead of 210,000 reaches the same-shaped reward curve 1000x sooner,
+    // but then the series only converges to 210 * 50 * 2 = 21,000, so
+    // MaxSupply would need shrinking to match if you want the cap to
+    // actually bind again.
     public static class Economics
     {
         public const string CoinbaseSender = "coinbase";
         public const decimal DefaultInitialBlockReward = 50m;
-        public static decimal InitialBlockReward = DefaultInitialBlockReward;
         public const int DefaultHalvingIntervalBlocks = 210_000;
-        public static int HalvingIntervalBlocks = DefaultHalvingIntervalBlocks;
         public const decimal DefaultMaxSupply = 21_000_000m;
-        public static decimal MaxSupply = DefaultMaxSupply;
 
         // Schedule-only reward for a given height, ignoring the max-supply cap.
-        public static decimal NominalBlockReward(int height)
+        public static decimal NominalBlockReward(int height, ConsensusRules rules)
         {
             if (height <= 0) return 0m; // genesis pays no reward
 
-            var halvings = height / HalvingIntervalBlocks;
+            var halvings = height / rules.HalvingIntervalBlocks;
             if (halvings >= 50) return 0m; // decayed to zero long before this many halvings
 
             var divisor = BigInteger.Pow(2, halvings);
-            return InitialBlockReward / (decimal)divisor;
+            return rules.InitialBlockReward / (decimal)divisor;
         }
 
         // Sums every coinbase-labeled transaction across the given chain prefix —
         // i.e. everything ever minted so far, purely from public chain data.
+        // Rule-agnostic: this is a plain fact about the chain's contents, not
+        // something a ConsensusRules affects.
         public static decimal TotalMintedSoFar(List<Block> ancestors)
         {
             decimal total = 0m;
@@ -244,14 +275,16 @@ namespace BitcoinNetworkSimulator
 
         // The actual reward a block at this height may claim: the schedule's
         // nominal reward, clamped so the running total minted across the whole
-        // chain never exceeds MaxSupply.
-        public static decimal ComputeBlockReward(List<Block> ancestors, int height)
+        // chain never exceeds `rules.MaxSupply` — that candidate block's own
+        // declared cap, checked against the chain's actual (rule-agnostic)
+        // minted-so-far total.
+        public static decimal ComputeBlockReward(List<Block> ancestors, int height, ConsensusRules rules)
         {
-            var nominal = NominalBlockReward(height);
+            var nominal = NominalBlockReward(height, rules);
             if (nominal <= 0m) return 0m;
 
             var mintedSoFar = TotalMintedSoFar(ancestors);
-            var remaining = MaxSupply - mintedSoFar;
+            var remaining = rules.MaxSupply - mintedSoFar;
             if (remaining <= 0m) return 0m;
 
             return nominal > remaining ? remaining : nominal;
@@ -308,7 +341,11 @@ namespace BitcoinNetworkSimulator
         // even starts. Genesis is exempt from proof-of-work (it's the fixed,
         // universally-agreed starting point every node is hardcoded to trust, the
         // same way real Bitcoin's genesis block is a checkpoint, not something
-        // your own node re-verifies by mining).
+        // your own node re-verifies by mining) — including a fixed, default
+        // ConsensusRules (Block.Rules' own default), regardless of whatever
+        // rules the node creating it happens to be configured with. See
+        // ConsensusRules' comment for why every OTHER block instead carries
+        // its own builder-declared rules.
         private static Block CreateGenesisBlock()
         {
             var genesis = new Block
@@ -317,7 +354,8 @@ namespace BitcoinNetworkSimulator
                 Timestamp = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
                 PreviousHash = "0",
                 BuiltBy = "genesis",
-                Target = ProofOfWork.TargetToHex(ProofOfWork.InitialTarget),
+                Rules = new ConsensusRules(),
+                Target = ProofOfWork.TargetToHex(ProofOfWork.MaxTarget >> ProofOfWork.DefaultInitialDifficultyShift),
                 Nonce = 0,
                 Transactions = new List<Transaction>()
             };
@@ -401,11 +439,16 @@ namespace BitcoinNetworkSimulator
 
                     var ancestors = candidate.GetRange(0, i); // blocks 0..i-1, i.e. up through parent
 
-                    var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors);
+                    // Every check below validates block against ITS OWN
+                    // declared Rules, not some network-wide value — see
+                    // ConsensusRules' comment. A block is valid if it
+                    // correctly followed the rules it claims to follow,
+                    // whatever those happen to be.
+                    var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, block.Rules);
                     if (block.Target != expectedTarget)
                         return (false, $"block #{block.Index} declares an incorrect target — expected {expectedTarget[..8]}..., " +
                             $"got {(block.Target.Length >= 8 ? block.Target[..8] : block.Target)}... " +
-                            "(target must match what every node independently computes from prior block timestamps)");
+                            "(target must match what this block's own declared Rules compute from prior block timestamps)");
 
                     if (!ProofOfWork.MeetsTarget(block.Hash, block.Target))
                         return (false, $"block #{block.Index} hash does not satisfy its declared target — not a valid proof of work");
@@ -420,7 +463,7 @@ namespace BitcoinNetworkSimulator
                     if (coinbaseTxs.Count > 1)
                         return (false, $"block #{block.Index} contains {coinbaseTxs.Count} coinbase transactions — only one is allowed per block");
 
-                    var expectedReward = Economics.ComputeBlockReward(ancestors, block.Index);
+                    var expectedReward = Economics.ComputeBlockReward(ancestors, block.Index, block.Rules);
                     if (expectedReward > 0m)
                     {
                         if (coinbaseTxs.Count != 1)
@@ -430,7 +473,7 @@ namespace BitcoinNetworkSimulator
                     }
                     else if (coinbaseTxs.Count != 0)
                     {
-                        return (false, $"block #{block.Index} includes a coinbase transaction, but the reward at this height has decayed to zero or the {Economics.MaxSupply}-coin max supply has already been reached");
+                        return (false, $"block #{block.Index} includes a coinbase transaction, but the reward at this height has decayed to zero or its own declared {block.Rules.MaxSupply}-coin max supply has already been reached");
                     }
                 }
 
@@ -553,9 +596,15 @@ namespace BitcoinNetworkSimulator
     //                  part of Block.ComputeHash's payload, so it must
     //                  round-trip exactly)
     //
-    // Amount is stored as TEXT (decimal.ToString(InvariantCulture)/decimal.Parse)
-    // rather than a numeric SQLite column, since SQLite has no native decimal
-    // type and REAL (double) would silently lose precision on a ledger.
+    // Amount (and the decimal-typed ConsensusRules fields, InitialBlockReward/
+    // MaxSupply) are stored as TEXT (decimal.ToString(InvariantCulture)/
+    // decimal.Parse) rather than a numeric SQLite column, since SQLite has no
+    // native decimal type and REAL (double) would silently lose precision on
+    // a ledger. blocks also carries every other ConsensusRules field
+    // (int/double columns), since a block's Rules feeds its own hash — see
+    // ConsensusRules' comment — so resuming from disk must reconstruct the
+    // exact same Rules a block was originally mined with, or its hash would
+    // no longer recompute to match what's on disk.
     //
     // Sync() is append-only in the common case (new blocks land as INSERTs,
     // nothing already on disk is touched) and, on a reorg, only replaces the
@@ -594,7 +643,15 @@ namespace BitcoinNetworkSimulator
                         built_by TEXT NOT NULL,
                         signature TEXT NOT NULL,
                         target TEXT NOT NULL,
-                        nonce INTEGER NOT NULL
+                        nonce INTEGER NOT NULL,
+                        retarget_interval_blocks INTEGER NOT NULL,
+                        target_seconds_per_block REAL NOT NULL,
+                        min_adjustment_factor REAL NOT NULL,
+                        max_adjustment_factor REAL NOT NULL,
+                        initial_difficulty_shift INTEGER NOT NULL,
+                        initial_block_reward TEXT NOT NULL,
+                        halving_interval_blocks INTEGER NOT NULL,
+                        max_supply TEXT NOT NULL
                     );
 
                     CREATE TABLE IF NOT EXISTS transactions (
@@ -629,7 +686,13 @@ namespace BitcoinNetworkSimulator
                 var blocksByIndex = new Dictionary<int, Block>();
                 using (var cmd = _connection.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT idx, timestamp, previous_hash, hash, built_by, signature, target, nonce FROM blocks ORDER BY idx;";
+                    cmd.CommandText = @"
+                        SELECT idx, timestamp, previous_hash, hash, built_by, signature, target, nonce,
+                               retarget_interval_blocks, target_seconds_per_block, min_adjustment_factor,
+                               max_adjustment_factor, initial_difficulty_shift, initial_block_reward,
+                               halving_interval_blocks, max_supply
+                        FROM blocks ORDER BY idx;
+                    ";
                     using var reader = cmd.ExecuteReader();
                     while (reader.Read())
                     {
@@ -643,6 +706,17 @@ namespace BitcoinNetworkSimulator
                             Signature = reader.GetString(5),
                             Target = reader.GetString(6),
                             Nonce = reader.GetInt64(7),
+                            Rules = new ConsensusRules
+                            {
+                                RetargetIntervalBlocks = reader.GetInt32(8),
+                                TargetSecondsPerBlock = reader.GetDouble(9),
+                                MinAdjustmentFactor = reader.GetDouble(10),
+                                MaxAdjustmentFactor = reader.GetDouble(11),
+                                InitialDifficultyShift = reader.GetInt32(12),
+                                InitialBlockReward = decimal.Parse(reader.GetString(13), CultureInfo.InvariantCulture),
+                                HalvingIntervalBlocks = reader.GetInt32(14),
+                                MaxSupply = decimal.Parse(reader.GetString(15), CultureInfo.InvariantCulture)
+                            },
                             Transactions = new List<Transaction>()
                         };
                         blocksByIndex[block.Index] = block;
@@ -721,8 +795,14 @@ namespace BitcoinNetworkSimulator
             {
                 cmd.Transaction = transaction;
                 cmd.CommandText = @"
-                    INSERT INTO blocks (idx, timestamp, previous_hash, hash, built_by, signature, target, nonce)
-                    VALUES ($idx, $timestamp, $previousHash, $hash, $builtBy, $signature, $target, $nonce);
+                    INSERT INTO blocks (idx, timestamp, previous_hash, hash, built_by, signature, target, nonce,
+                                         retarget_interval_blocks, target_seconds_per_block, min_adjustment_factor,
+                                         max_adjustment_factor, initial_difficulty_shift, initial_block_reward,
+                                         halving_interval_blocks, max_supply)
+                    VALUES ($idx, $timestamp, $previousHash, $hash, $builtBy, $signature, $target, $nonce,
+                            $retargetIntervalBlocks, $targetSecondsPerBlock, $minAdjustmentFactor,
+                            $maxAdjustmentFactor, $initialDifficultyShift, $initialBlockReward,
+                            $halvingIntervalBlocks, $maxSupply);
                 ";
                 cmd.Parameters.AddWithValue("$idx", block.Index);
                 cmd.Parameters.AddWithValue("$timestamp", block.Timestamp.ToString("O"));
@@ -732,6 +812,14 @@ namespace BitcoinNetworkSimulator
                 cmd.Parameters.AddWithValue("$signature", block.Signature);
                 cmd.Parameters.AddWithValue("$target", block.Target);
                 cmd.Parameters.AddWithValue("$nonce", block.Nonce);
+                cmd.Parameters.AddWithValue("$retargetIntervalBlocks", block.Rules.RetargetIntervalBlocks);
+                cmd.Parameters.AddWithValue("$targetSecondsPerBlock", block.Rules.TargetSecondsPerBlock);
+                cmd.Parameters.AddWithValue("$minAdjustmentFactor", block.Rules.MinAdjustmentFactor);
+                cmd.Parameters.AddWithValue("$maxAdjustmentFactor", block.Rules.MaxAdjustmentFactor);
+                cmd.Parameters.AddWithValue("$initialDifficultyShift", block.Rules.InitialDifficultyShift);
+                cmd.Parameters.AddWithValue("$initialBlockReward", block.Rules.InitialBlockReward.ToString(CultureInfo.InvariantCulture));
+                cmd.Parameters.AddWithValue("$halvingIntervalBlocks", block.Rules.HalvingIntervalBlocks);
+                cmd.Parameters.AddWithValue("$maxSupply", block.Rules.MaxSupply.ToString(CultureInfo.InvariantCulture));
                 cmd.ExecuteNonQuery();
             }
 

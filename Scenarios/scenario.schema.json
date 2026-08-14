@@ -85,55 +85,6 @@
           "type": "array",
           "description": "Each entry describes Count identically-configured nodes to add when this phase begins, applied in the order listed and added on top of whatever nodes already exist from earlier phases — e.g. a later phase modeling \"mining pools emerge\" might add a Pool-tagged group without touching anything already running. An empty/omitted list means \"no explicit nodes this phase\"; for phase 0 specifically, an empty/omitted list also means Program falls back to its normal single-node default start.",
           "items": { "$ref": "#/definitions/nodeGroup" }
-        },
-        "RetargetIntervalBlocks": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 2016,
-          "description": "CONSENSUS-CRITICAL — ONLY HONORED ON PHASE 0, ignored (with a warning) on any later phase, since every node re-derives the expected target for every block, including historical ones, purely from a block's height and this value; changing it mid-run would make already-mined blocks fail re-validation. How often (in blocks) proof-of-work difficulty retargets. Defaults to real Bitcoin's own 2016-block window."
-        },
-        "TargetSecondsPerBlock": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "default": 600,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. How long a block \"should\" take on average; retargeting pushes difficulty toward this pace. Defaults to real Bitcoin's own 10-minute (600s) target."
-        },
-        "MinAdjustmentFactor": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "maximum": 1,
-          "default": 0.25,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. Floor on how much easier a single retarget can make the target (0.25 = at most 4x easier). Already real Bitcoin's own clamp."
-        },
-        "MaxAdjustmentFactor": {
-          "type": "number",
-          "minimum": 1,
-          "default": 4,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. Ceiling on how much harder a single retarget can make the target (4 = at most 4x harder). Already real Bitcoin's own clamp."
-        },
-        "InitialDifficultyShift": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 8,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. Higher = harder (lower per-attempt mining success probability). Deliberately NOT matched to real Bitcoin's actual difficulty, which would make a block practically unmineable here — mining only gets a bounded number of attempts per turn (a node's HashPower), not the unbounded, massively-parallel search a real miner performs."
-        },
-        "InitialBlockReward": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "default": 50,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. Coinbase reward for the very first block, before any halving. Defaults to real Bitcoin's own 50 coins."
-        },
-        "HalvingIntervalBlocks": {
-          "type": "integer",
-          "minimum": 1,
-          "default": 210000,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. How often (in blocks) the coinbase reward halves. Defaults to real Bitcoin's own 210,000-block interval."
-        },
-        "MaxSupply": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "default": 21000000,
-          "description": "CONSENSUS-CRITICAL — phase-0-only, same rule as RetargetIntervalBlocks. Hard cap on total coins ever minted across the whole chain. Defaults to real Bitcoin's own 21,000,000 — which the default InitialBlockReward/HalvingIntervalBlocks pair converges to asymptotically, so the cap actually binds. Overriding InitialBlockReward/HalvingIntervalBlocks for a faster-paced run without also scaling this down means the cap may no longer bind in practice."
         }
       }
     },
@@ -172,6 +123,65 @@
           "minimum": 1,
           "default": 1,
           "description": "How heavily this group is weighted when other nodes are choosing their outbound peers — see the \"Peer topology\" note in README.md. 1 is an ordinary node; higher values make this group's nodes proportionally more likely to be picked as another node's outbound peer, turning them into structural hubs."
+        },
+        "Rules": {
+          "$ref": "#/definitions/consensusRules",
+          "description": "The consensus/economics ruleset this group's nodes build blocks under. Every block carries its builder's rules with it (see Blockchain.cs's ConsensusRules), so different groups genuinely can follow different rules within the same network — a block is valid if it correctly followed the rules IT declares, not some single value every node is forced to share. Omitted means every field below defaults."
+        }
+      }
+    },
+    "consensusRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "RetargetIntervalBlocks": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2016,
+          "description": "How often (in blocks) proof-of-work difficulty retargets. Defaults to real Bitcoin's own 2016-block window."
+        },
+        "TargetSecondsPerBlock": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 600,
+          "description": "How long a block \"should\" take on average; retargeting pushes difficulty toward this pace. Defaults to real Bitcoin's own 10-minute (600s) target."
+        },
+        "MinAdjustmentFactor": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.25,
+          "description": "Floor on how much easier a single retarget can make the target (0.25 = at most 4x easier). Already real Bitcoin's own clamp."
+        },
+        "MaxAdjustmentFactor": {
+          "type": "number",
+          "minimum": 1,
+          "default": 4,
+          "description": "Ceiling on how much harder a single retarget can make the target (4 = at most 4x harder). Already real Bitcoin's own clamp."
+        },
+        "InitialDifficultyShift": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 8,
+          "description": "Higher = harder (lower per-attempt mining success probability). Deliberately NOT matched to real Bitcoin's actual difficulty, which would make a block practically unmineable here — mining only gets a bounded number of attempts per turn (this group's HashPower), not the unbounded, massively-parallel search a real miner performs."
+        },
+        "InitialBlockReward": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 50,
+          "description": "Coinbase reward for the very first block, before any halving. Defaults to real Bitcoin's own 50 coins."
+        },
+        "HalvingIntervalBlocks": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 210000,
+          "description": "How often (in blocks) the coinbase reward halves. Defaults to real Bitcoin's own 210,000-block interval."
+        },
+        "MaxSupply": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 21000000,
+          "description": "Hard cap on total coins ever minted across the whole chain. Defaults to real Bitcoin's own 21,000,000 — which the default InitialBlockReward/HalvingIntervalBlocks pair converges to asymptotically, so the cap actually binds. Overriding InitialBlockReward/HalvingIntervalBlocks for a faster-paced run without also scaling this down means the cap may no longer bind in practice."
         }
       }
     }

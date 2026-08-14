@@ -272,7 +272,7 @@ namespace BitcoinNetworkSimulator
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
             Func<List<string>> getPeerIds = () => PeerIdsFor(id);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, chain, mempool, getPeerIds, watcher, signingKey);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.Rules, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, _port, getPeerIds);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
