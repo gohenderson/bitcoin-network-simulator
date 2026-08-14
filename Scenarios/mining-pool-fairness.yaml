@@ -1,0 +1,13 @@
+- Description: '15 nodes, fixed: 10 plain solo miners plus a 5-member pool (''cooperative'') at HashPower 50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity instead of five separate weaker shots, and splits its reward proportionally among members.'
+  DurationSeconds: 900
+  AutoGrowth: false
+  NodeGroups:
+  - Count: 10
+    Role: Honest
+    HashPower: 1
+    CanMine: true
+  - Count: 5
+    Role: Honest
+    HashPower: 50
+    CanMine: true
+    Pool: cooperative

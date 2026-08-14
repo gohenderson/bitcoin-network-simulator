@@ -1,0 +1,24 @@
+- Description: '4 honest nodes alongside one of each malicious NodeRole (Equivocator, Impersonator, Corruptor, Withholder). Watch the console/watcher-report.json for how each gets caught: BuiltBy signature verification rejects the Impersonator, hash/PoW re-checks reject the Corruptor, the Equivocator forces real forks/reorgs, and the Withholder''s partial gossip gets caught up via full-chain broadcast.'
+  DurationSeconds: 300
+  AutoGrowth: false
+  NodeGroups:
+  - Count: 4
+    Role: Honest
+    HashPower: 10
+    CanMine: true
+  - Count: 1
+    Role: Equivocator
+    HashPower: 10
+    CanMine: true
+  - Count: 1
+    Role: Impersonator
+    HashPower: 10
+    CanMine: true
+  - Count: 1
+    Role: Corruptor
+    HashPower: 10
+    CanMine: true
+  - Count: 1
+    Role: Withholder
+    HashPower: 10
+    CanMine: true

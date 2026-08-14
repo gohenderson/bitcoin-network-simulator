@@ -2,9 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using YamlDotNet.Serialization;
 
 namespace BitcoinNetworkSimulator
 {
@@ -156,22 +155,25 @@ namespace BitcoinNetworkSimulator
 
     public static class ScenarioLoader
     {
-        // NodeRole serialized by name, same as NodeMetadata, so a scenario
-        // file reads the same way metadata.json does.
-        private static readonly JsonSerializerOptions Options = new()
-        {
-            PropertyNameCaseInsensitive = true,
-            Converters = { new JsonStringEnumConverter() }
-        };
+        // NodeRole matched by its member name ("Honest", "Equivocator", ...)
+        // — YamlDotNet's default enum handling, same idea as NodeMetadata's
+        // JsonStringEnumConverter, so a scenario file reads the same way
+        // metadata.json does. IgnoreUnmatchedProperties so an unrecognized
+        // key (a typo, or a field from a differently-versioned scenario
+        // file) is skipped rather than a hard failure — matches
+        // System.Text.Json's default leniency, which this replaces.
+        private static readonly IDeserializer Deserializer = new DeserializerBuilder()
+            .IgnoreUnmatchedProperties()
+            .Build();
 
         // Returns null if `path` doesn't exist (no scenario — start
         // normally), the file is empty/parses to no phases, or it fails to
         // parse (all logged, then treated the same as absent, so a typo'd
-        // scenario file can't crash startup). A scenario file is a JSON
-        // array of phases — see the comment atop Scenario — not a single
-        // object; a bare `{...}` is a common enough mistake (e.g. a file
-        // written before this format existed) to detect and call out
-        // specifically rather than surfacing JsonSerializer's generic
+        // scenario file can't crash startup). A scenario file is a YAML
+        // list of phases — see the comment atop Scenario — not a single
+        // mapping; a bare top-level mapping is a common enough mistake
+        // (e.g. a single-phase file missing its leading `- `) to detect and
+        // call out specifically rather than surfacing YamlDotNet's generic
         // deserialization error for it.
         public static async Task<List<Scenario>?> LoadAsync(string path)
         {
@@ -179,18 +181,15 @@ namespace BitcoinNetworkSimulator
 
             try
             {
-                var json = await File.ReadAllTextAsync(path);
+                var yaml = await File.ReadAllTextAsync(path);
 
-                using (var probe = JsonDocument.Parse(json))
+                if (Deserializer.Deserialize<object?>(yaml) is IDictionary<object, object>)
                 {
-                    if (probe.RootElement.ValueKind == JsonValueKind.Object)
-                    {
-                        Console.WriteLine($"[scenario] {path} is a single JSON object, but a scenario file must be an array of phases — wrap it in [ ... ]; ignoring, starting normally");
-                        return null;
-                    }
+                    Console.WriteLine($"[scenario] {path} is a single YAML mapping, but a scenario file must be a list of phases — prefix it with '- '; ignoring, starting normally");
+                    return null;
                 }
 
-                var phases = JsonSerializer.Deserialize<List<Scenario>>(json, Options);
+                var phases = Deserializer.Deserialize<List<Scenario>>(yaml);
                 if (phases == null || phases.Count == 0)
                 {
                     Console.WriteLine($"[scenario] {path} parsed to no phases; ignoring, starting normally");
@@ -220,7 +219,7 @@ namespace BitcoinNetworkSimulator
         // into the new result folder (unmodified, same filename) when one
         // was used, so the folder is a self-contained record of both what
         // happened and exactly what configuration produced it — no need to
-        // go find Scenarios/whatever.json separately, which may have since
+        // go find Scenarios/whatever.yaml separately, which may have since
         // been edited or deleted. See "Scenarios" in README.md.
         public static string DetermineRunRootDir(string scenarioPath, List<Scenario>? phases)
         {

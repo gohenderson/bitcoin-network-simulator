@@ -99,11 +99,11 @@ until you press Enter.
 To run a specific scenario:
 
 ```
-dotnet run -- Scenarios/mining-pool-fairness.json
+dotnet run -- Scenarios/mining-pool-fairness.yaml
 ```
 
 (Path is relative to the current directory. `dotnet run` also picks up a
-`scenario.json` file next to the executable automatically, if present, when
+`scenario.yaml` file next to the executable automatically, if present, when
 no argument is given.)
 
 While it's running, query any node over HTTP by its id, e.g.:
@@ -131,7 +131,7 @@ unknown node id gets a 404 before the request ever reaches a node.
 
 ## Scenarios
 
-A scenario file is a JSON **array of phases**, applied in order, instead of
+A scenario file is a YAML **list of phases**, applied in order, instead of
 hand-editing `metadata.json` files after the fact. Phase 0's settings and
 `NodeGroups` take effect immediately; each later phase's settings and
 `NodeGroups` take over once the previous phase's `DurationSeconds` elapses —
@@ -140,37 +140,51 @@ early era, then a pool-dominated high-growth one, then a mature era with
 churn) instead of being fixed for its whole duration. A field a phase leaves
 out inherits whatever the previous phase had in effect (or the built-in
 default, for phase 0) — a phase only needs to state what's actually
-changing. See [`Scenario.cs`](Scenario.cs) for the full field-by-field
-format. Single-phase example (a plain array of one):
+changing. YAML comments (`#`) are fair game for narrating *why* a phase is
+shaped the way it is. See [`Scenario.cs`](Scenario.cs) for the full
+field-by-field format. Single-phase example (a plain list of one):
 
-```json
-[
-  {
-    "Description": "15 nodes, fixed: 10 plain solo miners plus a 5-member pool.",
-    "DurationSeconds": 900,
-    "AutoGrowth": false,
-    "NodeGroups": [
-      { "Count": 10, "Role": "Honest", "HashPower": 1, "CanMine": true },
-      { "Count": 5, "Role": "Honest", "HashPower": 50, "CanMine": true, "Pool": "cooperative" }
-    ]
-  }
-]
+```yaml
+- Description: 15 nodes, fixed: 10 plain solo miners plus a 5-member pool.
+  DurationSeconds: 900
+  AutoGrowth: false
+  NodeGroups:
+    - { Count: 10, Role: Honest, HashPower: 1, CanMine: true }
+    - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
 ```
 
 Multi-phase example — a slow genesis era, then pools emerge, then growth
 stops and nodes start churning, running indefinitely once fully mature:
 
-```json
-[
-  { "Description": "Genesis era", "DurationSeconds": 300, "AutoGrowth": false,
-    "NodeGroups": [ { "Count": 1, "Role": "Honest", "HashPower": 1, "CanMine": true } ] },
-  { "Description": "Early growth", "DurationSeconds": 600,
-    "AutoGrowth": true, "GrowthIntervalSeconds": 8, "GrowthRate": 2.0, "MaxNodes": 50 },
-  { "Description": "Pools emerge", "DurationSeconds": 600, "GrowthRate": 1.2,
-    "NodeGroups": [ { "Count": 5, "Role": "Honest", "HashPower": 50, "CanMine": true, "Pool": "cooperative" } ] },
-  { "Description": "Mature network", "AutoGrowth": false,
-    "ChurnIntervalSeconds": 30, "ChurnRate": 0.05, "ChurnMinNodes": 20 }
-]
+```yaml
+# Genesis era: one node, no growth yet.
+- Description: Genesis era
+  DurationSeconds: 300
+  AutoGrowth: false
+  NodeGroups:
+    - { Count: 1, Role: Honest, HashPower: 1, CanMine: true }
+
+# Early growth: organic growth turns on.
+- Description: Early growth
+  DurationSeconds: 600
+  AutoGrowth: true
+  GrowthIntervalSeconds: 8
+  GrowthRate: 2.0
+  MaxNodes: 50
+
+# Pools emerge: a mining pool joins mid-run, growth slows.
+- Description: Pools emerge
+  DurationSeconds: 600
+  GrowthRate: 1.2
+  NodeGroups:
+    - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
+
+# Mature network: growth stops, nodes start churning, runs until Enter.
+- Description: Mature network
+  AutoGrowth: false
+  ChurnIntervalSeconds: 30
+  ChurnRate: 0.05
+  ChurnMinNodes: 20
 ```
 
 Per-phase fields:
@@ -189,13 +203,13 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 
 | File | Demonstrates |
 |---|---|
-| `quick-demo.json` | A fast sanity check — a handful of modest miners, short duration. |
-| `hash-power-disparity.json` | Nodes with very different simulated hash power competing for blocks. |
-| `mining-pool-fairness.json` | A shared pool competing against solo miners, and proportional reward splitting. |
-| `wallet-only-network.json` | Mining-disabled, wallet-only nodes participating normally otherwise. |
-| `malicious-roles-showcase.json` | Each malicious node role in action (see below) and how honest nodes catch it. |
-| `large-scale-organic-growth.json` | A larger network growing over time. |
-| `economic-hub-topology.json` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
+| `quick-demo.yaml` | A fast sanity check — a handful of modest miners, short duration. |
+| `hash-power-disparity.yaml` | Nodes with very different simulated hash power competing for blocks. |
+| `mining-pool-fairness.yaml` | A shared pool competing against solo miners, and proportional reward splitting. |
+| `wallet-only-network.yaml` | Mining-disabled, wallet-only nodes participating normally otherwise. |
+| `malicious-roles-showcase.yaml` | Each malicious node role in action (see below) and how honest nodes catch it. |
+| `large-scale-organic-growth.yaml` | A larger network growing over time. |
+| `economic-hub-topology.yaml` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
 
 ## Node roles
 

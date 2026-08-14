@@ -83,13 +83,13 @@ namespace BitcoinNetworkSimulator
 
             // A scenario file governs this run's phases — starting node
             // population, growth/churn behavior, and duration for each — see
-            // "Scenarios" in README.md. `dotnet run -- path/to/scenario.json`
-            // picks a specific file; otherwise scenario.json next to the
+            // "Scenarios" in README.md. `dotnet run -- path/to/scenario.yaml`
+            // picks a specific file; otherwise scenario.yaml next to the
             // executable is used if present. No file at all means a normal
             // single-node, indefinite-runtime default, modeled below as an
             // implicit single empty phase so the rest of Main only ever has
             // to deal with "a list of phases," never a special no-scenario case.
-            var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.json");
+            var scenarioPath = args.Length > 0 ? args[0] : Path.Combine(AppContext.BaseDirectory, "scenario.yaml");
             var loadedPhases = await ScenarioLoader.LoadAsync(scenarioPath);
             var phases = loadedPhases ?? new List<Scenario> { new Scenario() };
 
