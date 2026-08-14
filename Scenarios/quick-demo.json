@@ -1,8 +1,10 @@
-{
-  "Description": "Small, fast sanity check: a handful of modest miners, organic growth left on, short duration. Good first scenario to confirm everything works.",
-  "DurationSeconds": 120,
-  "AutoGrowth": true,
-  "NodeGroups": [
-    { "Count": 3, "Role": "Honest", "HashPower": 5, "CanMine": true }
-  ]
-}
+[
+  {
+    "Description": "Small, fast sanity check: a handful of modest miners, organic growth left on, short duration. Good first scenario to confirm everything works.",
+    "DurationSeconds": 120,
+    "AutoGrowth": true,
+    "NodeGroups": [
+      { "Count": 3, "Role": "Honest", "HashPower": 5, "CanMine": true }
+    ]
+  }
+]

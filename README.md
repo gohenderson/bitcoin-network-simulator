@@ -131,31 +131,59 @@ unknown node id gets a 404 before the request ever reaches a node.
 
 ## Scenarios
 
-A scenario file declares a run's starting population, growth behavior, and
-duration up front, instead of hand-editing `metadata.json` files after the
-fact. See [`Scenario.cs`](Scenario.cs) for the full format. Example:
+A scenario file is a JSON **array of phases**, applied in order, instead of
+hand-editing `metadata.json` files after the fact. Phase 0's settings and
+`NodeGroups` take effect immediately; each later phase's settings and
+`NodeGroups` take over once the previous phase's `DurationSeconds` elapses —
+so a single run can model a network changing over time (e.g. a slow-growth
+early era, then a pool-dominated high-growth one, then a mature era with
+churn) instead of being fixed for its whole duration. A field a phase leaves
+out inherits whatever the previous phase had in effect (or the built-in
+default, for phase 0) — a phase only needs to state what's actually
+changing. See [`Scenario.cs`](Scenario.cs) for the full field-by-field
+format. Single-phase example (a plain array of one):
 
 ```json
-{
-  "Description": "15 nodes, fixed: 10 plain solo miners plus a 5-member pool.",
-  "DurationSeconds": 900,
-  "AutoGrowth": false,
-  "NodeGroups": [
-    { "Count": 10, "Role": "Honest", "HashPower": 1, "CanMine": true },
-    { "Count": 5, "Role": "Honest", "HashPower": 50, "CanMine": true, "Pool": "cooperative" }
-  ]
-}
+[
+  {
+    "Description": "15 nodes, fixed: 10 plain solo miners plus a 5-member pool.",
+    "DurationSeconds": 900,
+    "AutoGrowth": false,
+    "NodeGroups": [
+      { "Count": 10, "Role": "Honest", "HashPower": 1, "CanMine": true },
+      { "Count": 5, "Role": "Honest", "HashPower": 50, "CanMine": true, "Pool": "cooperative" }
+    ]
+  }
+]
 ```
 
-- `NodeGroups` — starting nodes, applied in order, as `{Count, Role, HashPower, CanMine, Pool, EconomicWeight}` groups.
+Multi-phase example — a slow genesis era, then pools emerge, then growth
+stops and nodes start churning, running indefinitely once fully mature:
+
+```json
+[
+  { "Description": "Genesis era", "DurationSeconds": 300, "AutoGrowth": false,
+    "NodeGroups": [ { "Count": 1, "Role": "Honest", "HashPower": 1, "CanMine": true } ] },
+  { "Description": "Early growth", "DurationSeconds": 600,
+    "AutoGrowth": true, "GrowthIntervalSeconds": 8, "GrowthRate": 2.0, "MaxNodes": 50 },
+  { "Description": "Pools emerge", "DurationSeconds": 600, "GrowthRate": 1.2,
+    "NodeGroups": [ { "Count": 5, "Role": "Honest", "HashPower": 50, "CanMine": true, "Pool": "cooperative" } ] },
+  { "Description": "Mature network", "AutoGrowth": false,
+    "ChurnIntervalSeconds": 30, "ChurnRate": 0.05, "ChurnMinNodes": 20 }
+]
+```
+
+Per-phase fields:
+
+- `NodeGroups` — nodes to add when this phase begins, applied in order, as `{Count, Role, HashPower, CanMine, Pool, EconomicWeight}` groups, added on top of whatever already exists from earlier phases. Empty/omitted on phase 0 specifically falls back to the normal single-node default start; empty/omitted on any later phase just means no explicit nodes that phase.
 - `AutoGrowth` (default `true`) — whether the network keeps growing organically on top of `NodeGroups`.
 - `GrowthIntervalSeconds` / `GrowthRate` / `MaxNodes` — override organic growth's pace/rate/cap. `GrowthRate` is a multiplier on the current node count applied each tick (default `2.0`, doubling; `1.5` adds 50% per tick).
 - `GrowthJitterSeconds` — random +/- range applied to `GrowthIntervalSeconds` each tick, so growth doesn't land on a perfectly regular schedule (default `0`, no jitter).
 - `GrowthMinSeedNodes` — floor the network tops up to, one node per tick, before `GrowthRate` scaling takes over (default `0`, no floor — rate scaling applies from the first tick).
 - `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling.
-- `ChurnIntervalSeconds` / `ChurnRate` / `ChurnMinNodes` — nodes leaving the live network, growth's counterpart. `ChurnRate` is the fraction of the current node count removed each tick (default `0`, disabled); `ChurnMinNodes` is a floor churn won't shrink below (default `1`). Independent of `AutoGrowth` — can run growth and churn together, or churn alone on a fixed `NodeGroups` population.
+- `ChurnIntervalSeconds` / `ChurnRate` / `ChurnMinNodes` — nodes leaving the live network, growth's counterpart. `ChurnRate` is the fraction of the current node count removed each tick (default `0`, disabled); `ChurnMinNodes` is a floor churn won't shrink below (default `1`). Independent of `AutoGrowth` — can run growth and churn together, or churn alone on a fixed population.
 - `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
-- `DurationSeconds` — automatically stop after this many seconds (Enter still works too, to stop early).
+- `DurationSeconds` — how long this phase lasts before the next one takes over (Enter still works too, to stop the whole run early). On the *last* phase, this instead means how long the whole run lasts before automatically shutting down; omitted there means no automatic stop. Omitted on any earlier phase means that phase — and therefore the run — never advances past it, so every non-last phase should set this.
 
 Included scenarios, in [`Scenarios/`](Scenarios/):
 
@@ -242,8 +270,8 @@ reconstructing reports or charting a run's progression over time.
 
 | File | Responsibility |
 |---|---|
-| `Program.cs` | Entry point / composition root: reads the scenario, builds a `NodeNetwork`, and starts the mining scheduler, transaction generator, growth loop, watcher, and persistence loops as async tasks. |
-| `NodeNetwork.cs` | The live network: the node/miner registry, the peer graph (weighted outbound peer selection — see [Peer topology](#how-it-works)), node naming and default role/mining-participation policy, node creation (`AddNodeAsync`), and organic growth (`GrowthLoopAsync`). |
+| `Program.cs` | Entry point / composition root: reads the scenario's phases and walks them in order, builds a `NodeNetwork`, and starts the mining scheduler, transaction generator, growth/churn loops, watcher, and persistence loops as async tasks. |
+| `NodeNetwork.cs` | The live network: the node/miner registry, the peer graph (weighted outbound peer selection — see [Peer topology](#how-it-works)), node naming and default role/mining-participation policy, node creation (`AddNodeAsync`), organic growth (`GrowthLoopAsync`), and node churn/departure (`ChurnLoopAsync`/`RemoveNode`). |
 | `MiningScheduler.cs` | Round-robin turn scheduling across whatever `IMiner`s currently exist — solo or pooled, reshuffled whenever a new block appears. |
 | `TransactionGenerator.cs` | Synthetic transaction traffic: picks a real sender/recipient pair from live balances each round and submits a transaction. |
 | `PersistenceLoop.cs` | Per-node persistence: resumes a node's chain from its `blockchain.db` at startup, then periodically syncs it back for the rest of the run. |

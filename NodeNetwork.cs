@@ -104,9 +104,15 @@ namespace BitcoinNetworkSimulator
 
         private readonly string _runRootDir;
         private readonly int _port;
-        private readonly int _outboundPeerCount;
-        private readonly double _maliciousFraction;
-        private readonly double _walletOnlyFraction;
+        // Node-creation defaults for whichever phase is currently active —
+        // see SetNodeCreationSettings. Not readonly: a multi-phase scenario
+        // (see "Scenarios" in README.md) can change these between phases,
+        // e.g. modeling outbound connectivity or the malicious/wallet-only
+        // mix shifting over a network's simulated history. Guarded by
+        // _lock, same as the rest of this class's mutable state.
+        private int _outboundPeerCount;
+        private double _maliciousFraction;
+        private double _walletOnlyFraction;
         private readonly Random _rng = new();
         private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
         private readonly Random _growthTimingRng = new(); // dedicated so growth-tick jitter never shares a Random with concurrently-running mining/peer-selection code
@@ -144,6 +150,22 @@ namespace BitcoinNetworkSimulator
             _walletOnlyFraction = walletOnlyFraction;
         }
 
+        // Called by Program at each phase transition (see "Scenarios" in
+        // README.md) to change what AddNodeAsync uses for nodes it creates
+        // from here on — organically-grown nodes and phase 0's single-node
+        // default start via _maliciousFraction/_walletOnlyFraction, every
+        // node's peer count via _outboundPeerCount. NodeGroups-authored
+        // nodes are unaffected (they always use their own Role/CanMine).
+        public void SetNodeCreationSettings(int outboundPeerCount, double maliciousFraction, double walletOnlyFraction)
+        {
+            lock (_lock)
+            {
+                _outboundPeerCount = outboundPeerCount;
+                _maliciousFraction = maliciousFraction;
+                _walletOnlyFraction = walletOnlyFraction;
+            }
+        }
+
         public List<string> GetAllNodeIds() { lock (_lock) { return new List<string>(_allNodeIds); } }
 
         // Backs NetworkServer's request dispatch — resolves a URL path's
@@ -179,11 +201,14 @@ namespace BitcoinNetworkSimulator
         private string BlockchainDbPathFor(string nodeId) =>
             Path.Combine(NodeDirFor(nodeId), "blockchain.db");
 
-        public async Task AddNodeAsync(ChainWatcher watcher, CancellationToken token)
+        public async Task AddNodeAsync(ChainWatcher watcher, CancellationToken token, ScenarioNodeGroup? group = null)
         {
             int index;
             List<string> existingIds;
             Dictionary<string, int> existingWeights;
+            int outboundPeerCount;
+            double maliciousFraction;
+            double walletOnlyFraction;
             lock (_lock)
             {
                 // _nextJoinIndex, not _allNodeIds.Count: once churn can remove
@@ -198,19 +223,28 @@ namespace BitcoinNetworkSimulator
                 index = _nextJoinIndex++;
                 existingIds = new List<string>(_allNodeIds);
                 existingWeights = new Dictionary<string, int>(_economicWeightByNodeId);
+                // Snapshotting these under the same lock as the settings
+                // themselves' writer (SetNodeCreationSettings) means a phase
+                // transition landing mid-call always resolves to one phase's
+                // settings or the other, never a torn mix of both.
+                outboundPeerCount = _outboundPeerCount;
+                maliciousFraction = _maliciousFraction;
+                walletOnlyFraction = _walletOnlyFraction;
             }
 
             var id = NodeNameFor(index);
 
             Directory.CreateDirectory(NodeDirFor(id));
-            var metadata = await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index, _maliciousFraction), AssignCanMine(index, _walletOnlyFraction));
+            var metadata = group != null
+                ? await NodeMetadataStore.LoadOrCreateFromGroupAsync(_runRootDir, id, group)
+                : await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index, maliciousFraction), AssignCanMine(index, walletOnlyFraction));
 
             // Picked from every node that exists so far (this node's own id
             // isn't in existingIds yet) — see the "Peer topology" note in
             // README.md. A node born with no peers yet (e.g. the very first
             // one) simply starts isolated and bootstraps connectivity as
             // later-joining nodes independently pick it.
-            var outboundPeers = ChooseWeightedPeers(existingIds, existingWeights, _outboundPeerCount, _peerSelectionRng);
+            var outboundPeers = ChooseWeightedPeers(existingIds, existingWeights, outboundPeerCount, _peerSelectionRng);
 
             lock (_lock)
             {

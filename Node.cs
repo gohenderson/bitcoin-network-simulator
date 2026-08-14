@@ -476,63 +476,49 @@ namespace BitcoinNetworkSimulator
             await File.WriteAllTextAsync(MetadataPathFor(runRootDir, metadata.Id), json);
         }
 
-        // Writes (or updates) nodes/<id>/metadata.json for every position
-        // `scenario`'s NodeGroups define, BEFORE any node is created or any
-        // metadata is loaded for real — this is what makes the scenario
-        // authoritative for behavior (NodeRole, HashPower, CanMine, Pool)
-        // every time it's applied, the same way hand-editing metadata.json
-        // already is. If a position already has metadata on disk (from a
-        // previous run, scenario or otherwise), its existing SigningKey is
-        // preserved rather than regenerated — see "Persistence & resume" and
-        // the "Signed blocks" note in README.md for why — so re-running the
-        // same scenario keeps building on the same node identities and chain
-        // history instead of resetting to genesis every time. Only a
-        // genuinely new position gets a freshly generated key. See "Scenarios"
-        // in README.md. `nodeNameFor` is Program's own index -> node-id naming
-        // policy (Greek alphabet names) — this store just needs an id for each
-        // position, not a say in how one gets picked.
-        public static async Task ApplyScenarioAsync(string runRootDir, Scenario scenario, Func<int, string> nodeNameFor)
+        // Writes (or updates) nodes/<id>/metadata.json for a single node a
+        // ScenarioNodeGroup describes, called once per node as
+        // NodeNetwork.AddNodeAsync creates it (whether that's phase 0's
+        // initial population or a later phase's mid-run NodeGroups) — this
+        // is what makes the scenario authoritative for behavior (NodeRole,
+        // HashPower, CanMine, Pool) every time a group is applied, the same
+        // way hand-editing metadata.json already is. If this id already has
+        // metadata on disk (from a previous run, scenario or otherwise), its
+        // existing SigningKey is preserved rather than regenerated — see
+        // "Persistence & resume" and the "Signed blocks" note in README.md
+        // for why — so re-running the same scenario keeps building on the
+        // same node identity and chain history instead of resetting to
+        // genesis every time. Only a genuinely new id gets a freshly
+        // generated key. See "Scenarios" in README.md.
+        public static async Task<NodeMetadata> LoadOrCreateFromGroupAsync(string runRootDir, string id, ScenarioNodeGroup group)
         {
-            var index = 0;
-            foreach (var group in scenario.NodeGroups)
+            NodeMetadata? existing = null;
+            var path = MetadataPathFor(runRootDir, id);
+            if (File.Exists(path))
             {
-                for (var i = 0; i < group.Count; i++, index++)
+                try
                 {
-                    var id = nodeNameFor(index);
-                    Directory.CreateDirectory(NodeDirFor(runRootDir, id));
-
-                    NodeMetadata? existing = null;
-                    var path = MetadataPathFor(runRootDir, id);
-                    if (File.Exists(path))
-                    {
-                        try
-                        {
-                            var json = await File.ReadAllTextAsync(path);
-                            existing = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[scenario] [{id}] failed to read existing metadata: {ex.Message}; treating as new");
-                        }
-                    }
-
-                    var metadata = existing ?? new NodeMetadata { Id = id };
-                    metadata.Id = id;
-                    metadata.NodeRole = group.Role;
-                    metadata.HashPower = group.HashPower;
-                    metadata.CanMine = group.CanMine;
-                    metadata.Pool = group.Pool;
-                    metadata.EconomicWeight = group.EconomicWeight;
-                    if (string.IsNullOrEmpty(metadata.SigningKey))
-                        metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
-
-                    await SaveAsync(runRootDir, metadata);
+                    var json = await File.ReadAllTextAsync(path);
+                    existing = JsonSerializer.Deserialize<NodeMetadata>(json, MetadataJsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[scenario] [{id}] failed to read existing metadata: {ex.Message}; treating as new");
                 }
             }
 
-            var durationNote = scenario.DurationSeconds is int d ? $", running for {d}s" : ", no automatic stop";
-            var growthNote = scenario.AutoGrowth ? ", auto-growth still enabled on top" : ", auto-growth disabled";
-            Console.WriteLine($"[scenario] applied {index} node(s) across {scenario.NodeGroups.Count} group(s){durationNote}{growthNote}");
+            var metadata = existing ?? new NodeMetadata { Id = id };
+            metadata.Id = id;
+            metadata.NodeRole = group.Role;
+            metadata.HashPower = group.HashPower;
+            metadata.CanMine = group.CanMine;
+            metadata.Pool = group.Pool;
+            metadata.EconomicWeight = group.EconomicWeight;
+            if (string.IsNullOrEmpty(metadata.SigningKey))
+                metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+
+            await SaveAsync(runRootDir, metadata);
+            return metadata;
         }
 
         // Registers every already-persisted node's public key (from a
