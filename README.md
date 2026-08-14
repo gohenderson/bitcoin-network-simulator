@@ -313,6 +313,55 @@ whatever they were assigned, they aren't retroactively reassigned.
 (a real, simulated fork) the moment their paths cross — see the "Peer
 discouragement" note above for what that does to their connection.
 
+`ValueSeeking` is a `NodeGroups` field that replaces a fixed
+`RulesName`/`RuleSchedule` with a live *computation*: instead of an author
+scripting which ruleset a group follows, each node in the group picks
+whichever of its `ValueSeekingCandidates` currently pays the most —
+`NominalBlockReward(height, rules) x Price(rules, height)` — recomputed
+fresh every time it mines. `Price` comes from each `NodeRules` entry's own
+`PriceSchedule` (the same `{ FromHeight, value }` shape as everything else
+here — see [`NodeRules`](#scenarios) below), a $-reference value over
+height, letting a scenario script a market event (a crash, a pump, a
+delisting) the same way it scripts a rule change. Because `PriceSchedule`
+and every candidate's `ConsensusRules` are public, scenario-authored facts
+— not private per-node randomness — every `ValueSeeking` node
+independently recomputes the identical answer at a given height, with no
+coordination needed, the same "recompute it yourself, don't trust a claim"
+property `ProofOfWork` and `Economics` already rely on elsewhere. For
+example:
+
+```yaml
+NodeRules:
+  - Name: real-bitcoin
+    InitialBlockReward: 50
+    PriceSchedule:
+      - { FromHeight: 0, Price: 100 }
+      - { FromHeight: 8, Price: 5 }
+  - Name: bitcoin-cash
+    InitialBlockReward: 10
+    PriceSchedule:
+      - { FromHeight: 0, Price: 20 }
+      - { FromHeight: 8, Price: 200 }
+
+NodeGroups:
+  - Count: 4
+    ValueSeeking: true
+    ValueSeekingCandidates: [real-bitcoin, bitcoin-cash]
+```
+
+— before height 8, `real-bitcoin` pays more (50 x 100 = 5000 vs. 10 x 20 =
+200), so every node in the group mines `real-bitcoin` blocks; at height 8
+the prices cross (50 x 5 = 250 vs. 10 x 200 = 2000) and every node
+independently switches to `bitcoin-cash` from that point on. `ValueSeeking`
+considers only the *explicit* names in `ValueSeekingCandidates`, never
+every priced `NodeRules` entry implicitly, and takes precedence over
+`RulesName`/`RuleSchedule` outright (logged warning) if both are set on
+the same group. Mining nodes only — a node with no mining turn has no
+"which ruleset am I building under" decision to make — and NodeGroups-authored
+only for now, not (yet) available to organically-grown nodes via
+`DefaultRuleSchedule`. See `Scenarios/value-seeking-competition.yaml` for
+this exact example running end to end.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -401,9 +450,11 @@ Per-NodeGroup fields:
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
 - `RulesName` — shorthand for a single-entry `RuleSchedule` (`{ FromHeight: 0, RulesName }`): this group's consensus/economics ruleset for its whole life, by name from the scenario file's top-level `NodeRules` list (below). Omitted (or a name not defined in `NodeRules`, logged as a warning) means every field below defaults. Ignored (with a warning) if `RuleSchedule` is also set.
 - `RuleSchedule` — this group's full timeline of which named ruleset (from `NodeRules`) is active at which block height, as a list of `{ FromHeight, RulesName }` entries — e.g. `real-bitcoin` from height 0, switching to a different named ruleset from height 6 on. Takes precedence over `RulesName` if both are set.
+- `ValueSeeking` (default `false`) — see the "ValueSeeking" note above. Dynamically picks this group's ruleset each height by live profitability instead of a fixed `RulesName`/`RuleSchedule`. Takes precedence over both (with a warning) if set alongside either and `ValueSeekingCandidates` resolves to at least one valid entry.
+- `ValueSeekingCandidates` — the explicit `NodeRules` names this group compares when `ValueSeeking` is `true`. A name not defined in `NodeRules` is a scenario-authoring mistake (logged as a warning, skipped).
 
 `NodeRules` — a top-level list of named rulesets, each `{ Name, ...the 8
-fields below }`. **Every node validates an incoming block against ITS OWN
+fields below, plus an optional PriceSchedule }`. **Every node validates an incoming block against ITS OWN
 `RuleSchedule` for that block's height, never against whatever the block
 itself claims** (`Block.Rules` is recorded for logging/introspection only —
 see [What this is not](#what-this-is-not)). So two `NodeGroups` stay in
@@ -419,6 +470,7 @@ can't be:
 - `InitialDifficultyShift` — starting difficulty (higher = harder). Default `8` — see [What this is not](#what-this-is-not) for why this one stays simulation-scaled.
 - `InitialBlockReward` / `HalvingIntervalBlocks` — coinbase reward for the first block, and how often (in blocks) it halves. Default `50` / `210000`.
 - `MaxSupply` — hard cap on total coins ever minted. Default `21000000` — with the default `InitialBlockReward`/`HalvingIntervalBlocks` pair, the halving series actually converges to this asymptotically, so the cap binds for real, not just in theory.
+- `PriceSchedule` — this ruleset's $-reference value over height, as a list of `{ FromHeight, Price }` entries — see the "ValueSeeking" note above. Omitted means worth $0 at every height (never picked over any priced alternative by a `ValueSeeking` node).
 
 Included scenarios, in [`Scenarios/`](Scenarios/):
 
@@ -432,6 +484,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `large-scale-organic-growth.yaml` | A larger network growing over time. |
 | `economic-hub-topology.yaml` | A few high-`EconomicWeight` hub nodes among many ordinary ones, with a small `OutboundPeerCount` so the hubs' disproportionate connectivity — and multi-hop relay — is visible. |
 | `consensus-rule-switch.yaml` | Two groups start under the same rules; one switches to a different named `RuleSchedule` entry partway through and the other doesn't — a real, simulated hard fork. |
+| `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. |
 
 ## Node roles
 
@@ -561,6 +614,11 @@ reconstructing reports or charting a run's progression over time.
   other's blocks from that point on — a real, simulated hard fork. That
   divergence, not a single node getting to declare its own arbitrary rules
   and have everyone accept them, is what a `RuleSchedule` is for modeling.
+  `ValueSeeking` is a dynamically-computed alternative to an author-scripted
+  `RuleSchedule` — see [Scenarios](#scenarios)' `ValueSeeking` note — but
+  still produces the same deterministic answer per height on every node
+  that shares its candidate set, so it forks (or stays in consensus) by
+  exactly the same rule.
 - A node's outbound peers are chosen once, at creation, and never rotate or
   get evicted for the rest of the run — real Bitcoin periodically refreshes
   connections. There's also no cap on inbound connections (real Bitcoin

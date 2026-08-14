@@ -235,6 +235,34 @@ namespace BitcoinNetworkSimulator
         public ConsensusRules Rules { get; set; } = new();
     }
 
+    // One entry in a NamedConsensusRules' PriceSchedule (Scenario.cs): Price
+    // becomes that ruleset's $-reference value starting at height FromHeight,
+    // until (if ever) a later-FromHeight entry supersedes it — same
+    // {FromHeight, value} shape as RuleScheduleEntry above. Consulted only by
+    // RuleSchedule's value-seeking mode when comparing candidate rulesets'
+    // live profitability; never resolved against anything by name, so —
+    // unlike RuleScheduleEntry — there's no separate Scenario-vs-resolved
+    // split needed: this one type is both the YAML shape and the runtime shape.
+    public class PriceScheduleEntry
+    {
+        public int FromHeight { get; set; } = 0;
+        public decimal Price { get; set; } = 0m;
+    }
+
+    // One candidate ruleset a ValueSeeking node compares against its peers —
+    // see RuleSchedule's value-seeking constructor below. Rules and
+    // PriceSchedule are copied out of whichever NamedConsensusRules entry
+    // ScenarioNodeGroup.ValueSeekingCandidates named, at scenario-load
+    // resolution time (ScenarioLoader.ResolveNodeRules) — same "resolved,
+    // name-free" philosophy as RuleScheduleEntry.Rules, so a node's own
+    // candidate set never needs to re-resolve names against a scenario file
+    // again after the run that created it.
+    public class ValueSeekingCandidate
+    {
+        public ConsensusRules Rules { get; set; } = new();
+        public List<PriceScheduleEntry> PriceSchedule { get; set; } = new();
+    }
+
     // ------------------------------------------------------------------
     // A node's own timeline of which ConsensusRules is active at which
     // height — see ConsensusRules' own comment for why this, not a single
@@ -243,14 +271,40 @@ namespace BitcoinNetworkSimulator
     // ScenarioNodeGroup created the node — see ScenarioNodeGroup.RuleSchedule
     // in Scenario.cs), and shared by both this node's Blockchain (for
     // validating incoming blocks) and its SoloMiner (for building its own).
+    //
+    // Has a second mode — see the value-seeking constructor below — but
+    // RulesForHeight's public signature is identical either way, so nothing
+    // that already calls it (ValidateChain's rulesForHeight delegate,
+    // TryAppend/TryReplaceWithLongerChain/TryLoadFrom, SoloMiner's own
+    // mining loop) needs to know or care which mode a given instance is in.
     // ------------------------------------------------------------------
     public class RuleSchedule
     {
-        private readonly List<RuleScheduleEntry> _entries;
+        private readonly List<RuleScheduleEntry> _entries; // static mode; empty in value-seeking mode
+        private readonly List<ValueSeekingCandidate> _valueSeekingCandidates; // value-seeking mode; empty in static mode
 
         public RuleSchedule(IEnumerable<RuleScheduleEntry> entries)
         {
             _entries = entries.OrderBy(e => e.FromHeight).ToList();
+            _valueSeekingCandidates = new List<ValueSeekingCandidate>();
+        }
+
+        // Value-seeking mode: instead of one author-scripted timeline, RulesForHeight
+        // dynamically picks whichever candidate is most profitable AT that height —
+        // NominalBlockReward(height, candidate.Rules) * price-at-height(candidate.PriceSchedule).
+        // Deliberately reward x PRICE only, no relative-hashrate/difficulty-cost factor:
+        // mining here is round-robin turn-allocated, so a miner's odds of winning ITS
+        // turn don't depend on which ruleset it mines under, only the payout does — see
+        // "ValueSeeking" in README.md. Public and deterministic (PriceSchedule and every
+        // candidate's Rules are scenario-authored, not per-node random state), so every
+        // value-seeking node independently arrives at the identical pick for a given
+        // height, the same way ProofOfWork/Economics' own recomputed-not-trusted values do.
+        public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates)
+        {
+            _entries = new List<RuleScheduleEntry>();
+            _valueSeekingCandidates = candidates
+                .Select(c => new ValueSeekingCandidate { Rules = c.Rules, PriceSchedule = c.PriceSchedule.OrderBy(p => p.FromHeight).ToList() })
+                .ToList();
         }
 
         // The ruleset active at `height`: the entry with the highest
@@ -260,6 +314,9 @@ namespace BitcoinNetworkSimulator
         // fallback a NodeGroup with no RuleSchedule/RulesName at all gets.
         public ConsensusRules RulesForHeight(int height)
         {
+            if (_valueSeekingCandidates.Count > 0)
+                return MostProfitableAt(height);
+
             var active = new ConsensusRules();
             foreach (var entry in _entries)
             {
@@ -267,6 +324,39 @@ namespace BitcoinNetworkSimulator
                 active = entry.Rules;
             }
             return active;
+        }
+
+        // Picks whichever candidate's NominalBlockReward x price-at-height is
+        // highest; first-in-list wins an exact tie (deterministic, same list
+        // order on every node). Falls back to `new ConsensusRules()` — same
+        // fallback an empty static schedule gets — when every candidate is
+        // worth exactly $0 (e.g. no PriceSchedule entry has activated yet).
+        private ConsensusRules MostProfitableAt(int height)
+        {
+            ConsensusRules? best = null;
+            var bestValue = 0m;
+            foreach (var candidate in _valueSeekingCandidates)
+            {
+                var price = PriceAt(candidate.PriceSchedule, height);
+                var value = Economics.NominalBlockReward(height, candidate.Rules) * price;
+                if (best == null || value > bestValue)
+                {
+                    best = candidate.Rules;
+                    bestValue = value;
+                }
+            }
+            return (best != null && bestValue > 0m) ? best : new ConsensusRules();
+        }
+
+        private static decimal PriceAt(List<PriceScheduleEntry> schedule, int height)
+        {
+            var price = 0m;
+            foreach (var entry in schedule)
+            {
+                if (entry.FromHeight > height) break;
+                price = entry.Price;
+            }
+            return price;
         }
     }
 

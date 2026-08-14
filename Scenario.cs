@@ -106,6 +106,14 @@ namespace BitcoinNetworkSimulator
     public class NamedConsensusRules : ConsensusRules
     {
         public string Name { get; set; } = "";
+        // This ruleset's $-reference value over height — see PriceScheduleEntry
+        // (Blockchain.cs) and RuleSchedule's value-seeking mode. Only consulted
+        // by a ValueSeeking NodeGroup's profitability comparison; omitted means
+        // this ruleset is worth $0 at every height, so a value-seeking node
+        // would never pick it over any priced alternative (falls back to
+        // ConsensusRules' own defaults if EVERY candidate is unpriced — see
+        // RuleSchedule.MostProfitableAt).
+        public List<PriceScheduleEntry> PriceSchedule { get; set; } = new();
     }
 
     // ------------------------------------------------------------------
@@ -288,6 +296,32 @@ namespace BitcoinNetworkSimulator
         // any other stale field). This is what NodeNetwork.AddNodeAsync
         // actually reads.
         public List<RuleScheduleEntry> ResolvedRuleSchedule { get; set; } = new();
+
+        // Whether this group dynamically picks its ruleset each height by live
+        // profitability (NominalBlockReward x PriceSchedule) instead of following
+        // a fixed RulesName/RuleSchedule — see "ValueSeeking" in README.md and
+        // RuleSchedule's value-seeking constructor in Blockchain.cs. Orthogonal to
+        // Role/CanMine (a ValueSeeking node is still Honest/malicious, still
+        // mines-or-not, exactly as configured) — mining nodes only for v1; setting
+        // it on a non-mining group has no effect (it never has a "which ruleset am
+        // I building under" decision to make). Default false.
+        public bool ValueSeeking { get; set; } = false;
+
+        // The explicit set of NodeRules entries (by Name) this group compares
+        // when ValueSeeking is true — NOT "every priced NodeRules entry
+        // implicitly". A name not defined in NodeRules is a scenario-authoring
+        // mistake (logged as a warning, that entry skipped). Ignored if
+        // ValueSeeking is false. Takes precedence over RulesName/RuleSchedule
+        // (logged warning if either is also set) when ValueSeeking is true and
+        // resolves to at least one valid candidate.
+        public List<string> ValueSeekingCandidates { get; set; } = new();
+
+        // Populated by ScenarioLoader.LoadAsync's resolution pass, from
+        // ValueSeekingCandidates looked up against NodeRules — never itself part
+        // of the YAML shape, same reasoning as ResolvedRuleSchedule. This is what
+        // NodeMetadataStore.LoadOrCreateFromGroupAsync actually reads. Empty
+        // unless ValueSeeking resolved successfully for this group.
+        public List<ValueSeekingCandidate> ResolvedValueSeekingCandidates { get; set; } = new();
     }
 
     // One entry in a ScenarioNodeGroup.RuleSchedule — see
@@ -357,19 +391,22 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Builds a Name -> ConsensusRules lookup from scenarioFile.NodeRules
+        // Builds a Name -> NamedConsensusRules lookup from scenarioFile.NodeRules
         // (last one wins on a duplicate Name, logged), then resolves every
         // phase's every NodeGroup's RuleSchedule/RulesName against it into
         // ResolvedRuleSchedule (RuleSchedule wins if both are set, logged),
-        // and scenarioFile.DefaultRuleSchedule into ResolvedDefaultRuleSchedule
-        // the same way. A RulesName that isn't defined in NodeRules is a
-        // scenario-authoring mistake, so it's logged rather than silently
-        // falling back; the fallback for that entry (or for a group with
-        // neither field set) is a plain `new ConsensusRules()` (real
-        // Bitcoin's own defaults).
+        // or — for a group with ValueSeeking set — its ValueSeekingCandidates
+        // into ResolvedValueSeekingCandidates instead (ValueSeeking wins over
+        // RulesName/RuleSchedule outright if both are set, logged; see
+        // "ValueSeeking" in README.md), and scenarioFile.DefaultRuleSchedule
+        // into ResolvedDefaultRuleSchedule the same way. A RulesName that
+        // isn't defined in NodeRules is a scenario-authoring mistake, so
+        // it's logged rather than silently falling back; the fallback for
+        // that entry (or for a group with neither field set) is a plain
+        // `new ConsensusRules()` (real Bitcoin's own defaults).
         private static void ResolveNodeRules(string path, ScenarioFile scenarioFile)
         {
-            var byName = new Dictionary<string, ConsensusRules>();
+            var byName = new Dictionary<string, NamedConsensusRules>();
             foreach (var rules in scenarioFile.NodeRules)
             {
                 if (string.IsNullOrWhiteSpace(rules.Name))
@@ -393,10 +430,38 @@ namespace BitcoinNetworkSimulator
             List<RuleScheduleEntry> ResolveSchedule(List<ScenarioRuleScheduleEntry> schedule) =>
                 schedule.Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName) }).ToList();
 
+            List<ValueSeekingCandidate> ResolveValueSeekingCandidates(List<string> names)
+            {
+                var result = new List<ValueSeekingCandidate>();
+                foreach (var name in names)
+                {
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    if (byName.TryGetValue(name, out var namedRules))
+                        result.Add(new ValueSeekingCandidate { Rules = namedRules, PriceSchedule = namedRules.PriceSchedule });
+                    else
+                        Console.WriteLine($"[scenario] {path} references ValueSeekingCandidates '{name}', which isn't defined in NodeRules; skipping it");
+                }
+                return result;
+            }
+
             foreach (var phase in scenarioFile.Phases)
             {
                 foreach (var group in phase.NodeGroups)
                 {
+                    if (group.ValueSeeking)
+                    {
+                        var candidates = ResolveValueSeekingCandidates(group.ValueSeekingCandidates);
+                        if (candidates.Count > 0)
+                        {
+                            if (group.RulesName != null || group.RuleSchedule.Count > 0)
+                                Console.WriteLine($"[scenario] {path} has a NodeGroup with both ValueSeeking and RulesName/RuleSchedule set; ValueSeeking wins");
+                            group.ResolvedValueSeekingCandidates = candidates;
+                            group.ResolvedRuleSchedule = new List<RuleScheduleEntry>();
+                            continue; // skip the static RuleSchedule/RulesName resolution below for this group
+                        }
+                        Console.WriteLine($"[scenario] {path} has ValueSeeking: true but ValueSeekingCandidates resolved to no valid entries; falling back to RulesName/RuleSchedule");
+                    }
+
                     if (group.RuleSchedule.Count > 0)
                     {
                         if (group.RulesName != null)

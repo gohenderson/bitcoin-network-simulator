@@ -149,6 +149,16 @@
           "type": "array",
           "description": "This group's full timeline of which named ruleset is active at which block height — e.g. real-bitcoin from height 0, switching to a different named ruleset from height 6 on. Takes precedence over RulesName if both are set.",
           "items": { "$ref": "#/definitions/ruleScheduleEntry" }
+        },
+        "ValueSeeking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this group dynamically picks its ruleset each height by live profitability (NominalBlockReward x PriceSchedule) instead of a fixed RulesName/RuleSchedule — see \"ValueSeeking\" in README.md. Takes precedence over RulesName/RuleSchedule if both are set and ValueSeekingCandidates resolves to at least one valid entry."
+        },
+        "ValueSeekingCandidates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of NodeRules entries this group compares when ValueSeeking is true. A name not defined in NodeRules is a scenario-authoring mistake (logged as a warning, skipped)."
         }
       }
     },
@@ -198,6 +208,23 @@
         "RulesName": {
           "type": "string",
           "description": "Name of an entry in the scenario file's top-level NodeRules list, assigned as the Percent share's single, lifelong ConsensusRules. Referencing a name not defined in NodeRules is a scenario-authoring mistake (logged as a warning; falls back to defaults)."
+        }
+      }
+    },
+    "priceScheduleEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "FromHeight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Price below becomes this ruleset's $-reference value starting at this block height (inclusive), until a later entry (if any) supersedes it."
+        },
+        "Price": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "This ruleset's $ value from FromHeight on. Only consulted by a ValueSeeking NodeGroup's profitability comparison (NominalBlockReward x Price)."
         }
       }
     },
@@ -258,6 +285,11 @@
           "exclusiveMinimum": 0,
           "default": 21000000,
           "description": "Hard cap on total coins ever minted across the whole chain. Defaults to real Bitcoin's own 21,000,000 — which the default InitialBlockReward/HalvingIntervalBlocks pair converges to asymptotically, so the cap actually binds. Overriding InitialBlockReward/HalvingIntervalBlocks for a faster-paced run without also scaling this down means the cap may no longer bind in practice."
+        },
+        "PriceSchedule": {
+          "type": "array",
+          "description": "This ruleset's $-reference value over height — see \"ValueSeeking\" in README.md. Omitted means worth $0 at every height (never picked over any priced alternative by a value-seeking node).",
+          "items": { "$ref": "#/definitions/priceScheduleEntry" }
         }
       }
     }

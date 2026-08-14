@@ -447,6 +447,18 @@ namespace BitcoinNetworkSimulator
         // and SoloMiner build/validate against the exact same schedule they
         // always have, not whatever this run's scenario happens to say now.
         public List<RuleScheduleEntry> RuleSchedule { get; set; } = new();
+        // A ValueSeeking node's own resolved candidate set — see ScenarioNodeGroup.ValueSeekingCandidates
+        // and RuleSchedule's value-seeking constructor in Blockchain.cs. Mutually
+        // exclusive with RuleSchedule above (NodeGroups-authored nodes get exactly
+        // one populated, never both — see ScenarioLoader.ResolveNodeRules); empty
+        // (the default) means this node is NOT value-seeking. Organically-grown
+        // and default-start nodes always leave this empty — ValueSeeking is
+        // NodeGroups-authored only in v1, no DefaultRuleSchedule-style
+        // integration. Persisted here, resolved and name-free, for the same
+        // restart-safety reason RuleSchedule is: a resumed node builds/validates
+        // against the exact candidate set (Rules + PriceSchedule values) it
+        // always has, not whatever this run's scenario file's NodeRules say now.
+        public List<ValueSeekingCandidate> ValueSeekingCandidates { get; set; } = new();
         // Base64-encoded DER (ECDsa.ExportECPrivateKey) signing identity key
         // — see the "Signed blocks" note in README.md. Unlike every other
         // field here, this one should never be hand-edited or deleted once a
@@ -592,6 +604,7 @@ namespace BitcoinNetworkSimulator
             metadata.Pool = group.Pool;
             metadata.EconomicWeight = group.EconomicWeight;
             metadata.RuleSchedule = group.ResolvedRuleSchedule;
+            metadata.ValueSeekingCandidates = group.ResolvedValueSeekingCandidates;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

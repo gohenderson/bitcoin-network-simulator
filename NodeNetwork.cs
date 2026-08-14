@@ -291,7 +291,15 @@ namespace BitcoinNetworkSimulator
             // currently expects at a given height, and SoloMiner uses the
             // exact same lookup to decide what to build under — see
             // RuleSchedule's own comment in Blockchain.cs.
-            var ruleSchedule = new RuleSchedule(metadata.RuleSchedule);
+            // ValueSeeking mode: metadata.ValueSeekingCandidates non-empty means this
+            // node dynamically picks its ruleset by live profitability each height
+            // instead of following a fixed timeline — see RuleSchedule's
+            // value-seeking constructor in Blockchain.cs. Same shared-instance wiring
+            // either way: Blockchain (validation) and SoloMiner (building) both get
+            // this one RuleSchedule object.
+            var ruleSchedule = metadata.ValueSeekingCandidates.Count > 0
+                ? new RuleSchedule(metadata.ValueSeekingCandidates)
+                : new RuleSchedule(metadata.RuleSchedule);
             var chain = new Blockchain(ruleSchedule);
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);

@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: real-bitcoin
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 100 }   # starts strongly ahead
+      - { FromHeight: 8, Price: 5 }     # then crashes
+  - Name: bitcoin-cash
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 20 }    # starts behind
+      - { FromHeight: 8, Price: 200 }   # then pumps, overtaking real-bitcoin
+
+Phases:
+  - Description: >-
+      4 ValueSeeking nodes compare real-bitcoin (reward 50) against bitcoin-cash (reward
+      10) purely by live profitability (NominalBlockReward x PriceSchedule): before height
+      8, real-bitcoin's 50 x 100 = 5000 beats bitcoin-cash's 10 x 20 = 200, so they build
+      real-bitcoin blocks (watch for "reward 50" in the console). At height 8 the prices
+      cross — real-bitcoin crashes to 5 (50 x 5 = 250) while bitcoin-cash pumps to 200
+      (10 x 200 = 2000) — and every ValueSeeking node independently switches to
+      bitcoin-cash blocks ("reward 10") from that point on, with no coordination needed:
+      the formula is public and deterministic, so they all reach the same answer. A fixed
+      2-node control group stays on real-bitcoin the whole time and forks away from the
+      ValueSeeking group the moment it switches — see the "Peer discouragement" note in
+      README.md for what that does to their connection.
+    DurationSeconds: 180
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 4
+        Role: Honest
+        HashPower: 20
+        ValueSeeking: true
+        ValueSeekingCandidates: [real-bitcoin, bitcoin-cash]
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RulesName: real-bitcoin
