@@ -11,6 +11,15 @@ NodeRules:
     HalvingIntervalBlocks: 210000
     MaxSupply: 21000000
 
+DefaultRuleSchedule:
+  # Every organically-grown node also follows real-bitcoin, same as the seed
+  # NodeGroup below — keeps the whole network in consensus as it grows.
+  # (Coincidentally identical to the hardcoded ConsensusRules defaults this
+  # scenario would fall back to anyway — see README.md's "Scenarios" section
+  # for how Percent/FromHeight let a growth demo split organically-grown
+  # nodes across multiple rulesets instead.)
+  - { FromHeight: 0, RulesName: real-bitcoin, Percent: 100 }
+
 Phases:
   - Description: >-
       Starts at a single node and lets organic growth run unrestricted (roughly doubling every

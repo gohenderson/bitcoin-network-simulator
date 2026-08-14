@@ -141,8 +141,9 @@ unknown node id gets a 404 before the request ever reaches a node.
 
 ## Scenarios
 
-A scenario file is a YAML mapping with a top-level **`Phases`** list and an
-optional top-level **`NodeRules`** list. `Phases` is the run's timeline,
+A scenario file is a YAML mapping with a top-level **`Phases`** list, an
+optional top-level **`NodeRules`** list, and an optional top-level
+**`DefaultRuleSchedule`** list. `Phases` is the run's timeline,
 applied in order: phase 0's settings and `NodeGroups` take effect
 immediately; each later phase's settings and `NodeGroups` take over once
 the previous phase's `DurationSeconds` elapses — so a single run can model
@@ -234,14 +235,51 @@ for the synchronized case (both groups switch together and stay in
 consensus).
 
 **Caution for `AutoGrowth: true` scenarios:** a node organic growth adds was
-never authored by any `NodeGroups` entry, so it always gets an empty
-`RuleSchedule` (real Bitcoin's own numbers, for its whole life — see
-[Per-NodeGroup fields](#scenarios) below). If a `NodeGroups` entry's own
-schedule later switches to something else, it forks away from every
-organically-grown node the moment it switches — almost certainly not what
-you want in a growth demo. Give a `RuleSchedule` that switches only to
+never authored by any `NodeGroups` entry, so its rules come from
+`DefaultRuleSchedule` below — real Bitcoin's own numbers, for its whole
+life, if `DefaultRuleSchedule` is omitted (see [Per-NodeGroup
+fields](#scenarios) below). If a `NodeGroups` entry's own schedule later
+switches to something else, it forks away from every organically-grown node
+(or every share of them not itself claimed by a matching
+`DefaultRuleSchedule` entry) the moment it switches — almost certainly not
+what you want in a growth demo. Give a `RuleSchedule` that switches only to
 scenarios with `AutoGrowth: false` (a fixed, fully `NodeGroups`-authored
 population), unless the fork itself is the point.
+
+`DefaultRuleSchedule` controls which rules organically-grown nodes follow —
+every node organic growth creates, plus the initial dynamic-start node, but
+never a `NodeGroups`-authored node (those always use their own
+`RulesName`/`RuleSchedule`). It has the same shape as a `NodeGroups`
+entry's `RuleSchedule` — a list of `{ FromHeight, RulesName }` entries — plus
+a `Percent` (0-100, not a 0-1 fraction) on each entry: the share of
+newly-created nodes at or after that height which should follow those
+rules, decided by random chance per node at creation time. Entries are
+resolved in reverse declaration order — the *last*-declared entry active at
+a height gets its full stated `Percent`, and every earlier entry active at
+that height is reduced by however much the later entries have already
+claimed. Any percentage nobody claims falls back to a node's hardcoded
+`ConsensusRules` defaults. For example:
+
+```yaml
+DefaultRuleSchedule:
+  - { FromHeight: 0, RulesName: bitcoin-cash, Percent: 50 }
+```
+
+— half of all organically-grown nodes get `bitcoin-cash`'s rules, the other
+half fall back to hardcoded defaults. Whereas:
+
+```yaml
+DefaultRuleSchedule:
+  - { FromHeight: 0, RulesName: real-bitcoin, Percent: 100 }
+  - { FromHeight: 0, RulesName: bitcoin-cash, Percent: 20 }
+```
+
+— the second (later-declared) entry claims its full 20% first, leaving the
+first entry with only 80%, not its stated 100% (`real-bitcoin` 80% /
+`bitcoin-cash` 20%, nothing left unclaimed). `FromHeight` gates entries the
+same way a `RuleSchedule`'s does — an entry with `FromHeight: 6` only
+applies to nodes created once the network's chain has reached height 6;
+nodes created earlier aren't retroactively reassigned.
 
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
@@ -316,7 +354,7 @@ Per-phase fields (inside `Phases`):
 - `GrowthIntervalSeconds` / `GrowthRate` / `MaxNodes` — override organic growth's pace/rate/cap. `GrowthRate` is a multiplier on the current node count applied each tick (default `2.0`, doubling; `1.5` adds 50% per tick).
 - `GrowthJitterSeconds` — random +/- range applied to `GrowthIntervalSeconds` each tick, so growth doesn't land on a perfectly regular schedule (default `0`, no jitter).
 - `GrowthMinSeedNodes` — floor the network tops up to, one node per tick, before `GrowthRate` scaling takes over (default `0`, no floor — rate scaling applies from the first tick).
-- `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling. Organically-grown nodes also get `ConsensusRules`' own defaults (real Bitcoin's numbers), same as a `NodeGroups` entry with no `RulesName`.
+- `GrowthMaliciousFraction` / `GrowthWalletOnlyFraction` — override the role/mining-participation mix for auto-created nodes (the initial dynamic-start node, plus every node organic growth adds — not `NodeGroups`, which set `Role`/`CanMine` explicitly per group). Defaults `0.5` and `1/3`, matching the simulator's original fixed cycling. Organically-grown nodes' rules come from the top-level `DefaultRuleSchedule` (see [Scenarios](#scenarios) above) — real Bitcoin's own defaults for any share it doesn't claim.
 - `ChurnIntervalSeconds` / `ChurnRate` / `ChurnMinNodes` — nodes leaving the live network, growth's counterpart. `ChurnRate` is the fraction of the current node count removed each tick (default `0`, disabled); `ChurnMinNodes` is a floor churn won't shrink below (default `1`). Independent of `AutoGrowth` — can run growth and churn together, or churn alone on a fixed population.
 - `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
 - `DurationSeconds` — how long this phase lasts before the next one takes over (Enter still works too, to stop the whole run early). On the *last* phase, this instead means how long the whole run lasts before automatically shutting down; omitted there means no automatic stop. Omitted on any earlier phase means that phase — and therefore the run — never advances past it, so every non-last phase should set this.

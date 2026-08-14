@@ -433,8 +433,9 @@ namespace BitcoinNetworkSimulator
         // previous run, or hand-edited by a user to bump HashPower or change
         // NodeRole) so it survives a restart unchanged. Only a brand new node —
         // no metadata.json yet — gets fresh defaults, written out immediately so
-        // they're there to edit or resume from next time. `defaultRole` and
-        // `defaultCanMine` are the caller's (NodeNetwork.AssignRole/AssignCanMine)
+        // they're there to edit or resume from next time. `defaultRole`,
+        // `defaultCanMine`, and `defaultRuleSchedule` are the caller's
+        // (NodeNetwork.AssignRole/AssignCanMine/PickDefaultRuleSchedule)
         // default-assignment policy for a brand new node — this store only
         // decides whether an existing file's contents win over those defaults,
         // never what the defaults themselves should be. SigningKey is handled
@@ -443,7 +444,7 @@ namespace BitcoinNetworkSimulator
         // re-saved immediately, exactly as if it were brand new — see the
         // "Signed blocks" note in README.md for why that key, once established,
         // must never change again.
-        public static async Task<NodeMetadata> LoadOrCreateAsync(string runRootDir, string id, NodeRole defaultRole, bool defaultCanMine)
+        public static async Task<NodeMetadata> LoadOrCreateAsync(string runRootDir, string id, NodeRole defaultRole, bool defaultCanMine, List<RuleScheduleEntry> defaultRuleSchedule)
         {
             var path = MetadataPathFor(runRootDir, id);
             if (File.Exists(path))
@@ -475,6 +476,7 @@ namespace BitcoinNetworkSimulator
                 NodeRole = defaultRole,
                 HashPower = 1,
                 CanMine = defaultCanMine,
+                RuleSchedule = defaultRuleSchedule,
                 SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256))
             };
             await SaveAsync(runRootDir, metadata);

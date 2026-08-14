@@ -113,10 +113,18 @@ namespace BitcoinNetworkSimulator
         private int _outboundPeerCount;
         private double _maliciousFraction;
         private double _walletOnlyFraction;
+        // What RuleSchedule a brand-new organically-grown node gets — see
+        // ScenarioFile.DefaultRuleSchedule's own comment for the
+        // percentage/priority semantics and PickDefaultRuleScheduleEntry
+        // below for the implementation. Whole-run, not phase-mutable like
+        // the three fields above (ScenarioFile.DefaultRuleSchedule lives at
+        // the file root, not per-phase), so this one IS readonly.
+        private readonly List<ResolvedDefaultRuleScheduleEntry> _defaultRuleSchedule;
         private readonly Random _rng = new();
         private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
         private readonly Random _growthTimingRng = new(); // dedicated so growth-tick jitter never shares a Random with concurrently-running mining/peer-selection code
         private readonly Random _churnRng = new(); // dedicated so churn's node selection never shares a Random with concurrently-running mining/peer-selection/growth-timing code
+        private readonly Random _defaultRuleScheduleRng = new(); // dedicated so a new organic node's rules pick never shares a Random with concurrently-running mining/peer-selection/growth-timing/churn code
 
         // All mutable registry state below is guarded by this one lock —
         // nodes call the getters at broadcast time so newly joined peers are
@@ -141,13 +149,14 @@ namespace BitcoinNetworkSimulator
         private readonly Dictionary<string, HashSet<string>> _peerIdsByNodeId = new();
         private readonly Dictionary<string, int> _economicWeightByNodeId = new();
 
-        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction)
+        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction, List<ResolvedDefaultRuleScheduleEntry> defaultRuleSchedule)
         {
             _runRootDir = runRootDir;
             _port = port;
             _outboundPeerCount = outboundPeerCount;
             _maliciousFraction = maliciousFraction;
             _walletOnlyFraction = walletOnlyFraction;
+            _defaultRuleSchedule = defaultRuleSchedule;
         }
 
         // Called by Program at each phase transition (see "Scenarios" in
@@ -209,6 +218,7 @@ namespace BitcoinNetworkSimulator
             int outboundPeerCount;
             double maliciousFraction;
             double walletOnlyFraction;
+            int currentHeight;
             lock (_lock)
             {
                 // _nextJoinIndex, not _allNodeIds.Count: once churn can remove
@@ -230,6 +240,14 @@ namespace BitcoinNetworkSimulator
                 outboundPeerCount = _outboundPeerCount;
                 maliciousFraction = _maliciousFraction;
                 walletOnlyFraction = _walletOnlyFraction;
+                // A representative chain height for DefaultRuleSchedule's
+                // FromHeight gating below — see PickDefaultRuleScheduleEntry.
+                // _allNodes[0] is an arbitrary-but-consistent stand-in (same
+                // pattern as CurrentTipHash()); individual nodes' own tips
+                // can differ slightly during an active fork, but this only
+                // needs to be "close enough" to decide which DefaultRuleSchedule
+                // entries have activated yet, not exact.
+                currentHeight = _allNodes.Count > 0 ? _allNodes[0].Chain.Latest.Index : 0;
             }
 
             var id = NodeNameFor(index);
@@ -237,7 +255,7 @@ namespace BitcoinNetworkSimulator
             Directory.CreateDirectory(NodeDirFor(id));
             var metadata = group != null
                 ? await NodeMetadataStore.LoadOrCreateFromGroupAsync(_runRootDir, id, group)
-                : await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index, maliciousFraction), AssignCanMine(index, walletOnlyFraction));
+                : await NodeMetadataStore.LoadOrCreateAsync(_runRootDir, id, AssignRole(index, maliciousFraction), AssignCanMine(index, walletOnlyFraction), PickDefaultRuleSchedule(currentHeight));
 
             // Picked from every node that exists so far (this node's own id
             // isn't in existingIds yet) — see the "Peer topology" note in
@@ -350,6 +368,53 @@ namespace BitcoinNetworkSimulator
             }
 
             return chosen;
+        }
+
+        // Picks, for a brand-new organically-grown node, the ConsensusRules
+        // it should get (or null for hardcoded defaults) — see
+        // ScenarioFile.DefaultRuleSchedule's own comment in Scenario.cs for
+        // the full reverse-declaration-priority semantics this implements.
+        // `height` is the representative chain height AddNodeAsync
+        // snapshotted, gating which entries have activated yet.
+        private ConsensusRules? PickDefaultRuleScheduleEntry(int height)
+        {
+            var active = _defaultRuleSchedule.Where(e => e.FromHeight <= height).ToList();
+            if (active.Count == 0) return null;
+
+            // Reverse declaration order: the LAST-declared active entry
+            // gets first claim on the 100-point pool (guaranteeing its
+            // exact Percent, pool permitting), working back to the FIRST,
+            // which absorbs whatever's left, capped at its own Percent.
+            var pool = 100.0;
+            var shares = new List<(ConsensusRules Rules, double Share)>();
+            for (var i = active.Count - 1; i >= 0; i--)
+            {
+                var share = Math.Min(active[i].Percent, pool);
+                pool -= share;
+                if (share > 0) shares.Add((active[i].Rules, share));
+            }
+
+            var roll = _defaultRuleScheduleRng.NextDouble() * 100.0;
+            var cumulative = 0.0;
+            foreach (var (rules, share) in shares)
+            {
+                cumulative += share;
+                if (roll < cumulative) return rules;
+            }
+            return null; // unclaimed remainder — hardcoded defaults
+        }
+
+        // Wraps PickDefaultRuleScheduleEntry's single ConsensusRules pick
+        // into the single-entry RuleSchedule NodeMetadata actually stores —
+        // an empty list if the pick landed on "hardcoded defaults", which
+        // NodeMetadata.RuleSchedule's own default already means the same
+        // thing as (see RuleSchedule.RulesForHeight in Blockchain.cs).
+        private List<RuleScheduleEntry> PickDefaultRuleSchedule(int height)
+        {
+            var rules = PickDefaultRuleScheduleEntry(height);
+            return rules == null
+                ? new List<RuleScheduleEntry>()
+                : new List<RuleScheduleEntry> { new RuleScheduleEntry { FromHeight = 0, Rules = rules } };
         }
 
         // Exponential growth, not linear: each tick, the network grows by

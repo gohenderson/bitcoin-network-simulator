@@ -15,6 +15,11 @@
       "type": "array",
       "description": "A named library of ConsensusRules a NodeGroup can reference by RulesName instead of repeating the same block inline. Two entries sharing a Name is a scenario-authoring mistake (the last one silently wins) — keep names unique.",
       "items": { "$ref": "#/definitions/namedConsensusRules" }
+    },
+    "DefaultRuleSchedule": {
+      "type": "array",
+      "description": "Controls which ConsensusRules organically-grown nodes follow (organic growth / AutoGrowth-created nodes, and the initial dynamic-start node — never NodeGroups-authored nodes, which always use their own RulesName/RuleSchedule). Each entry claims a Percent share of new nodes created at or after its FromHeight, decided by random chance per node at creation time. Entries are resolved in reverse declaration order: the LAST-declared entry active at a given height gets its full stated Percent, and each earlier-declared entry active at that height is reduced by every later entry's Percent (so declaring a 20% entry after an existing 100% entry leaves the first at 80%, not 100%). Any percentage left unclaimed falls back to a node's hardcoded ConsensusRules defaults. See the ScenarioDefaultRuleScheduleEntry doc comment in Scenario.cs for the full worked examples.",
+      "items": { "$ref": "#/definitions/defaultRuleScheduleEntry" }
     }
   },
   "definitions": {
@@ -160,6 +165,28 @@
         "RulesName": {
           "type": "string",
           "description": "Name of an entry in the scenario file's top-level NodeRules list, active from FromHeight on. Referencing a name not defined in NodeRules is a scenario-authoring mistake (logged as a warning; falls back to defaults for this entry)."
+        }
+      }
+    },
+    "defaultRuleScheduleEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "FromHeight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "This entry only applies to nodes created once the network's chain has reached this block height (inclusive). Omitted defaults to 0 — applies from the very first organically-created node on."
+        },
+        "RulesName": {
+          "type": "string",
+          "description": "Name of an entry in the scenario file's top-level NodeRules list, assigned (as a single-entry {FromHeight: 0, RulesName} RuleSchedule) to the Percent share of new nodes this entry wins. Referencing a name not defined in NodeRules is a scenario-authoring mistake (logged as a warning; falls back to defaults)."
+        },
+        "Percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 0,
+          "description": "What percentage (0-100, not a 0-1 fraction) of new nodes at this height should be assigned RulesName, decided by random chance per node. Later-declared entries take priority: their Percent is reserved first, shrinking the effective share of earlier entries active at the same height."
         }
       }
     },

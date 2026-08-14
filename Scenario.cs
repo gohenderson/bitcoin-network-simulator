@@ -21,6 +21,81 @@ namespace BitcoinNetworkSimulator
     {
         public List<Scenario> Phases { get; set; } = new();
         public List<NamedConsensusRules> NodeRules { get; set; } = new();
+
+        // What RuleSchedule a brand-new ORGANICALLY-GROWN node gets (one
+        // never authored by any NodeGroups entry — see NodeNetwork's growth
+        // loop and the single-node default start). Whole-run, not
+        // per-phase: unlike everything under Phases, this lives at the file
+        // root because it describes one policy for "any node that just
+        // shows up" for the run's whole duration, the same way NodeRules
+        // does. See DefaultRuleSchedule's own doc comment for the exact
+        // percentage/priority semantics — it's not a simple "sum to 100%"
+        // list. Empty (the default) means every organically-grown node gets
+        // ConsensusRules' own defaults, same as today.
+        public List<ScenarioDefaultRuleScheduleEntry> DefaultRuleSchedule { get; set; } = new();
+
+        // Populated by ScenarioLoader.LoadAsync's resolution pass, from
+        // DefaultRuleSchedule's RulesName pointers looked up against
+        // NodeRules — never itself part of the YAML shape, same reasoning
+        // as ScenarioNodeGroup.ResolvedRuleSchedule. This is what
+        // NodeNetwork actually reads.
+        public List<ResolvedDefaultRuleScheduleEntry> ResolvedDefaultRuleSchedule { get; set; } = new();
+    }
+
+    // ------------------------------------------------------------------
+    // One entry in ScenarioFile.DefaultRuleSchedule — same {FromHeight,
+    // RulesName} shape as ScenarioRuleScheduleEntry, plus Percent: the
+    // chance (0-100, NOT a 0-1 fraction like GrowthMaliciousFraction and
+    // friends elsewhere in this file) that a brand-new organically-grown
+    // node gets assigned RulesName as its own, single, lifelong
+    // RuleSchedule, once the network's current chain height reaches
+    // FromHeight.
+    //
+    // THE PERCENTAGES ARE NOT INDEPENDENT — entries are allocated in
+    // REVERSE DECLARATION ORDER (last-listed first) against a shared
+    // 100-point pool, at whatever height a new node is actually being
+    // created: each entry (among those with FromHeight <= that height)
+    // claims min(its own Percent, however much pool is left), and
+    // whatever's left after every ACTIVE entry has taken its share falls
+    // back to ConsensusRules' own defaults. In effect, LATER-DECLARED
+    // entries are guaranteed their exact stated share (as long as the pool
+    // has room), and EARLIER-DECLARED entries absorb whatever's left,
+    // capped at their own declared Percent. Concretely:
+    //
+    //   - One entry alone, Percent: 50 — exactly 50% of new nodes get it;
+    //     the other 50% get hardcoded defaults (the pool has 50 left over).
+    //   - Two entries, first Percent: 100, second Percent: 20 (declared
+    //     after the first) — the SECOND gets its full 20% (declared later,
+    //     so it goes first against the pool: min(20, 100) = 20, pool now
+    //     80); the FIRST is left with only 80% (min(100, 80) = 80), not
+    //     its originally-stated 100 — "each new rule added to the schedule
+    //     adjusts the [effective] distribution by exactly that %."
+    //   - A later entry can fully displace an earlier one if the pool runs
+    //     out before reaching it — a signal the declared Percents add up
+    //     to more than is achievable; nothing crashes, but earlier entries
+    //     may end up with less than their stated share.
+    //
+    // FromHeight lets this distribution itself change as the network
+    // matures — e.g. every new node gets real-bitcoin rules until height
+    // 50, then a 30%-adopted upgraded ruleset enters the mix for anything
+    // created from height 50 on. See PickDefaultRuleScheduleEntry in
+    // NodeNetwork.cs for the implementation, and "Scenarios" in README.md
+    // for a fully worked example.
+    // ------------------------------------------------------------------
+    public class ScenarioDefaultRuleScheduleEntry
+    {
+        public int FromHeight { get; set; } = 0;
+        public string? RulesName { get; set; } = null;
+        public double Percent { get; set; } = 0;
+    }
+
+    // The resolved, name-free runtime equivalent of
+    // ScenarioDefaultRuleScheduleEntry — see NodeNetwork.PickDefaultRuleScheduleEntry.
+    public class ResolvedDefaultRuleScheduleEntry
+    {
+        public int FromHeight { get; set; } = 0;
+        public double Percent { get; set; } = 0;
+        public ConsensusRules Rules { get; set; } = new();
     }
 
     // A ConsensusRules with a Name, purely so a ScenarioNodeGroup can refer
@@ -288,11 +363,13 @@ namespace BitcoinNetworkSimulator
         // Builds a Name -> ConsensusRules lookup from scenarioFile.NodeRules
         // (last one wins on a duplicate Name, logged), then resolves every
         // phase's every NodeGroup's RuleSchedule/RulesName against it into
-        // ResolvedRuleSchedule. RuleSchedule wins if both are set (logged).
-        // A RulesName that isn't defined in NodeRules is a scenario-authoring
-        // mistake, so it's logged rather than silently falling back; the
-        // fallback for that entry (or for a group with neither field set)
-        // is a plain `new ConsensusRules()` (real Bitcoin's own defaults).
+        // ResolvedRuleSchedule (RuleSchedule wins if both are set, logged),
+        // and scenarioFile.DefaultRuleSchedule into ResolvedDefaultRuleSchedule
+        // the same way. A RulesName that isn't defined in NodeRules is a
+        // scenario-authoring mistake, so it's logged rather than silently
+        // falling back; the fallback for that entry (or for a group with
+        // neither field set) is a plain `new ConsensusRules()` (real
+        // Bitcoin's own defaults).
         private static void ResolveNodeRules(string path, ScenarioFile scenarioFile)
         {
             var byName = new Dictionary<string, ConsensusRules>();
@@ -338,6 +415,15 @@ namespace BitcoinNetworkSimulator
                     }
                 }
             }
+
+            scenarioFile.ResolvedDefaultRuleSchedule = scenarioFile.DefaultRuleSchedule
+                .Select(entry => new ResolvedDefaultRuleScheduleEntry
+                {
+                    FromHeight = entry.FromHeight,
+                    Percent = Math.Max(0, entry.Percent),
+                    Rules = ResolveOne(entry.RulesName)
+                })
+                .ToList();
         }
 
         private static string SanitizeForFileName(string value)
