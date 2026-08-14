@@ -47,7 +47,11 @@ namespace BitcoinNetworkSimulator
     public class SoloMiner : IMiner
     {
         public string Id { get; }
-        public int HashPower { get; }
+        // Mutable (private set) so Reinvestment (see MineAndBroadcastSingleRoundAsync)
+        // can grow it at runtime; read fresh everywhere it's used (MineBlock,
+        // the CostPerAttempt threshold), never cached, so a mid-turn increase
+        // is picked up automatically with no other code changes.
+        public int HashPower { get; private set; }
         public string Label => Id;
 
         private readonly int _serverPort;
@@ -89,11 +93,20 @@ namespace BitcoinNetworkSimulator
         // Lets this SoloMiner remove ITSELF from the network on insolvency —
         // see NodeNetwork.AddNodeAsync's requestForcedChurn closure.
         private readonly Action _requestForcedChurn;
+        // $ cost to buy +1 HashPower — see ScenarioNodeGroup.HashPowerCost. 0
+        // (default) disables the reinvestment check entirely.
+        private readonly decimal _hashPowerCost;
+        // Upper bound HashPowerCost-driven reinvestment won't grow HashPower
+        // past — see ScenarioNodeGroup.MaxHashPower. 0 means uncapped.
+        private readonly int _maxHashPower;
+        // Cumulative $ already committed to past HashPower purchases — never
+        // reset, mirrors _accruedLivingCost; see MineAndBroadcastSingleRoundAsync.
+        private decimal _investedInHashPower = 0m;
 
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
@@ -104,6 +117,8 @@ namespace BitcoinNetworkSimulator
             _costOfLiving = costOfLiving;
             _startingCapital = startingCapital;
             _requestForcedChurn = requestForcedChurn;
+            _hashPowerCost = hashPowerCost;
+            _maxHashPower = maxHashPower;
             _ruleSchedule = ruleSchedule;
             _chain = chain;
             _mempool = mempool;
@@ -251,6 +266,29 @@ namespace BitcoinNetworkSimulator
                     Console.WriteLine($"[{Id}] insolvent: accrued living cost {_accruedLivingCost} exceeds net worth {netWorth} plus starting capital {_startingCapital} — leaving the network");
                     _requestForcedChurn();
                     return;
+                }
+            }
+
+            // Reinvestment: once this node's own EARNED profit (net worth beyond what's
+            // already committed to accrued living cost or past hardware purchases)
+            // covers HashPowerCost, it buys +1 HashPower — modeling real hash power
+            // reinvesting profit into more hardware instead of just banking it. Same
+            // virtual-ledger approach as CostOfLiving: _investedInHashPower is a
+            // running tally compared against net worth, not an actual on-chain
+            // transaction. Deliberately doesn't draw on StartingCapital — that's a
+            // solvency buffer, not investable capital — so a node still running on its
+            // starting cushion doesn't "reinvest" money it hasn't actually made. At
+            // most one purchase per turn, so growth is gradual and observable. See
+            // "Reinvestment" in README.md.
+            if (_hashPowerCost > 0m && _ruleSchedule.IsValueSeeking && (_maxHashPower <= 0 || HashPower < _maxHashPower))
+            {
+                var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
+                var uncommitted = netWorth - _accruedLivingCost - _investedInHashPower;
+                if (uncommitted >= _hashPowerCost)
+                {
+                    _investedInHashPower += _hashPowerCost;
+                    HashPower++;
+                    Console.WriteLine($"[{Id}] reinvesting profit: HashPower {HashPower - 1} -> {HashPower} ({_hashPowerCost} committed, {uncommitted} was available)");
                 }
             }
 

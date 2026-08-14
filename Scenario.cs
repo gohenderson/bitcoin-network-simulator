@@ -273,6 +273,18 @@ namespace BitcoinNetworkSimulator
         // this, a brand-new node with CostOfLiving set would go bankrupt on its
         // very first turn (zero balance, zero income yet). Default 0.
         public decimal StartingCapital { get; set; } = 0m;
+        // $ cost to buy +1 HashPower, drawn from this node's own earned profit
+        // (net worth beyond accrued living cost and past purchases, never
+        // StartingCapital) — see "Reinvestment" in README.md. Only meaningful for
+        // a ValueSeeking group. Default 0 disables reinvestment entirely (today's
+        // behavior, unchanged) — a group must opt in explicitly.
+        public decimal HashPowerCost { get; set; } = 0m;
+        // Upper bound on how much HashPowerCost-driven reinvestment can grow this
+        // group's HashPower. Default 0 means uncapped — since HashPower directly
+        // bounds real per-turn hash computation, an uncapped, long-running,
+        // consistently-profitable scenario can grow this arbitrarily large; set
+        // this to bound simulation cost.
+        public int MaxHashPower { get; set; } = 0;
         public bool CanMine { get; set; } = true;
         public string? Pool { get; set; } = null;
         // See NodeMetadata.EconomicWeight and the "Peer topology" note in

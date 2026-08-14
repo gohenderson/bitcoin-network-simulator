@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: chain
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 5 }
+
+Phases:
+  - Description: >-
+      Two ValueSeeking nodes start identical (HashPower 20, ~7.5% win probability per turn,
+      ~$3.76 expected income per turn) mining the same ruleset. grower reinvests every $40 of
+      earned profit into +1 HashPower (capped at 50) — real hash power compounding into more
+      hardware instead of banking winnings — so its win probability (and therefore its income
+      rate) climbs as the run goes on: 30 HashPower is an 11.1% win chance, 40 is 14.5%, the
+      50 cap is 17.8%, more than double where it started. static keeps a fixed HashPower 20
+      the whole time for comparison. Watch "reinvesting profit" in the console and compare how
+      much more often grower appears in "mined block" lines as the run progresses.
+    DurationSeconds: 180
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 1
+        Role: Honest
+        HashPower: 20
+        HashPowerCost: 40
+        MaxHashPower: 50
+        ValueSeeking: true
+        ValueSeekingCandidates: [chain]
+      - Count: 1
+        Role: Honest
+        HashPower: 20
+        ValueSeeking: true
+        ValueSeekingCandidates: [chain]

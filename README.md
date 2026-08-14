@@ -414,6 +414,28 @@ against. See `Scenarios/mining-bankruptcy.yaml`, where a node whose
 bankrupt within its first few turns, watched over by a comfortably solvent
 one mining the same ruleset.
 
+**Reinvestment.** Every mechanism above lets a node survive or fail, but
+none of them let it *grow* — `HashPower` has otherwise been fixed for a
+node's whole life. `HashPowerCost` (a per-`NodeGroups` field, default `0`)
+closes that loop: once a node's own *earned profit* — net worth beyond
+whatever's already committed to accrued `CostOfLiving` or past purchases —
+covers `HashPowerCost`, it buys `+1 HashPower`, the same real dynamic of
+mining operations reinvesting winnings into more hardware instead of just
+banking them. Deliberately never draws on `StartingCapital`, which stays a
+protected solvency buffer rather than investable capital — a node still
+living off its starting cushion (hasn't yet out-earned its own bills)
+correctly doesn't reinvest money it hasn't actually made. At most one
+purchase per turn, so growth is gradual and observable rather than an
+instant lump sum. Because `HashPower` feeds directly into
+`ProofOfWork.WinProbability`, reinvestment is a genuine compounding loop —
+more hash power wins more often, which affords more hash power — capped by
+`MaxHashPower` (default `0`, uncapped) so a long-running, consistently
+profitable node doesn't grow its own per-turn hash computation without
+bound. Only meaningful for a `ValueSeeking` group, same restriction as
+`CostPerAttempt`/`CostOfLiving`. See `Scenarios/mining-reinvestment.yaml`,
+where a reinvesting node's win probability climbs from 7.5% to 17.8% over
+the run while a fixed-`HashPower` control node's stays flat.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -500,6 +522,8 @@ Per-NodeGroup fields:
 - `CostPerAttempt` (default `0`, mining is free) — see the "Mining costs" note above. `$` cost per nonce tried; only consulted for a `ValueSeeking` group, which sits idle instead of mining any turn its best candidate doesn't clear `CostPerAttempt x HashPower`.
 - `CostOfLiving` (default `0`, no living cost) — see the "Cost of living" note above. `$` fixed cost owed every turn regardless of outcome; only consulted for a `ValueSeeking` group, which is forced out of the network (churned) once accrued cost exceeds its on-chain net worth plus `StartingCapital`.
 - `StartingCapital` (default `0`) — see the "Cost of living" note above. `$` runway a node starts with, on top of its on-chain balance's market value, before `CostOfLiving` can push it into insolvency.
+- `HashPowerCost` (default `0`, reinvestment disabled) — see the "Reinvestment" note above. `$` cost to buy `+1 HashPower` from a `ValueSeeking` node's own earned profit.
+- `MaxHashPower` (default `0`, uncapped) — see the "Reinvestment" note above. Upper bound `HashPowerCost`-driven reinvestment can grow a node's `HashPower` to.
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
@@ -542,6 +566,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `value-seeking-competition.yaml` | `ValueSeeking` nodes compare two rulesets' live profitability (`NominalBlockReward x PriceSchedule`) and switch sides the moment a scripted price crossover makes the other one pay more — a fixed control group stays put and forks away from them. A third price crash then drops both rulesets below `CostPerAttempt`, and the group goes idle rather than mine at a loss. |
 | `mining-difficulty-tradeoff.yaml` | Two `ValueSeeking` groups with very different `HashPower` see the exact same prices and rewards but reach opposite conclusions, because expected value also weighs each candidate's `InitialDifficultyShift` — the low-`HashPower` group can't realistically win the harder, richer ruleset and mines the easier one instead. |
 | `mining-bankruptcy.yaml` | Two `ValueSeeking` nodes mine the same ruleset with very different `CostOfLiving` — one comfortably outearns its overhead and survives indefinitely, the other's overhead structurally exceeds even its best-case income and it's forced out of the network (churned) once accrued cost exceeds its on-chain net worth. |
+| `mining-reinvestment.yaml` | Two identical `ValueSeeking` nodes mine the same ruleset, but one reinvests earned profit into `+HashPower` — its win probability (and therefore income) compounds upward over the run while a fixed-`HashPower` control node's stays flat. |
 
 ## Node roles
 

@@ -144,6 +144,18 @@
           "default": 0,
           "description": "$ runway this group's node starts with, on top of its on-chain balance's market value, before CostOfLiving can push it into insolvency. Without this, a brand-new node with CostOfLiving set would go bankrupt on its very first turn."
         },
+        "HashPowerCost": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "$ cost to buy +1 HashPower, drawn from this group's node's own earned profit (net worth beyond accrued living cost and past purchases, never StartingCapital) — see \"Reinvestment\" in README.md. Only meaningful for a ValueSeeking group. Default 0 disables reinvestment entirely (unchanged behavior)."
+        },
+        "MaxHashPower": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Upper bound on how much HashPowerCost-driven reinvestment can grow this group's HashPower. Default 0 means uncapped — since HashPower directly bounds real per-turn hash computation, set this to bound simulation cost on a long-running, consistently-profitable scenario."
+        },
         "CanMine": {
           "type": "boolean",
           "default": true,

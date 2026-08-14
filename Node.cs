@@ -424,6 +424,13 @@ namespace BitcoinNetworkSimulator
         // $ runway on top of on-chain net worth before CostOfLiving can push
         // this node into insolvency — see ScenarioNodeGroup.StartingCapital.
         public decimal StartingCapital { get; set; } = 0m;
+        // $ cost to buy +1 HashPower — see ScenarioNodeGroup.HashPowerCost.
+        // Persisted for the same restart-safety reason every other
+        // group-authored field is. 0 (default) means reinvestment is disabled.
+        public decimal HashPowerCost { get; set; } = 0m;
+        // Upper bound HashPowerCost-driven reinvestment won't grow HashPower
+        // past — see ScenarioNodeGroup.MaxHashPower. 0 means uncapped.
+        public int MaxHashPower { get; set; } = 0;
         // Whether this node ever gets a mining turn. A node with CanMine false
         // still does everything else a full node does — serves /chain, /tx,
         // /balances, receives and validates blocks and chains from peers, holds
@@ -621,6 +628,8 @@ namespace BitcoinNetworkSimulator
             metadata.CostPerAttempt = group.CostPerAttempt;
             metadata.CostOfLiving = group.CostOfLiving;
             metadata.StartingCapital = group.StartingCapital;
+            metadata.HashPowerCost = group.HashPowerCost;
+            metadata.MaxHashPower = group.MaxHashPower;
             if (string.IsNullOrEmpty(metadata.SigningKey))
                 metadata.SigningKey = ExportSigningKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
 

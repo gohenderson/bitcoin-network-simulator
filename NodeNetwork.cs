@@ -314,7 +314,7 @@ namespace BitcoinNetworkSimulator
             // already-in-flight iteration, which will simply stop seeing this miner
             // on its next fresh SnapshotMiners() call.
             Action requestForcedChurn = () => RemoveNode(id, watcher);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, _port, getPeerIds, discouragePeer);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
