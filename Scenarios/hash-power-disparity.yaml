@@ -14,3 +14,15 @@
     Role: Honest
     HashPower: 1
     CanMine: true
+
+  # Consensus economics/proof-of-work — real Bitcoin's own numbers,
+  # explicit here for clarity (phase-0-only; see README.md's "Scenarios"
+  # section for why these do not vary phase to phase).
+  RetargetIntervalBlocks: 2016
+  TargetSecondsPerBlock: 600
+  MinAdjustmentFactor: 0.25
+  MaxAdjustmentFactor: 4
+  InitialDifficultyShift: 8
+  InitialBlockReward: 50
+  HalvingIntervalBlocks: 210000
+  MaxSupply: 21000000

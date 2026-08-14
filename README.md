@@ -21,8 +21,12 @@ behaviors — not to be a secure or production-grade implementation. See
 - **Proof-of-work.** Every block header carries a public 256-bit `Target`.
   Any peer can verify a block's hash independently by recomputing the
   expected target from prior block timestamps (`ProofOfWork.ComputeExpectedTargetHex`)
-  and checking the hash satisfies it. Difficulty retargets every 10 blocks
-  to a 3-second-per-block goal, clamped to a 4x swing per retarget.
+  and checking the hash satisfies it. Difficulty retargets every 2016 blocks
+  to a 10-minute-per-block goal, clamped to a 4x swing per retarget — real
+  Bitcoin's own numbers, scenario-configurable (see
+  [Scenarios](#scenarios)) for a faster-paced run. The starting difficulty
+  itself is *not* real Bitcoin's — see [What this is
+  not](#what-this-is-not).
 - **Mining.** Mining is round-robin: one node gets a turn, then the next, and
   so on, so there's exactly one CPU-bound mining attempt happening at a
   time and no per-node background threads. A turn is bounded — a node tries
@@ -51,10 +55,13 @@ behaviors — not to be a secure or production-grade implementation. See
   the peer graph is connected. See `NodeNetwork.cs` and the "Peer
   topology" fields under [Scenarios](#scenarios).
 - **Coin issuance.** Each block's winning miner earns a coinbase reward,
-  starting at 50 coins and halving every 210 blocks (toy-scaled down from
-  Bitcoin's 210,000), with the total ever minted hard-capped at 21,000,000.
-  Every node recomputes the expected reward for any block independently and
-  rejects a mismatch.
+  starting at 50 coins and halving every 210,000 blocks, with the total ever
+  minted hard-capped at 21,000,000 — real Bitcoin's own numbers, and at
+  these defaults the halving schedule's asymptotic supply actually
+  converges to the cap, not just in theory. Every node recomputes the
+  expected reward for any block independently and rejects a mismatch.
+  Scenario-configurable (see [Scenarios](#scenarios)) for a faster-paced
+  run.
 - **Balances & double-spends.** Every account's balance is derived purely
   from chain history (`Ledger.ComputeBalances`). A block containing a
   transaction that spends more than the sender's balance at that exact
@@ -229,6 +236,23 @@ Per-phase fields:
 - `OutboundPeerCount` — override how many outbound peers each node picks (default 8). See [Peer topology](#how-it-works) and `EconomicWeight` above.
 - `DurationSeconds` — how long this phase lasts before the next one takes over (Enter still works too, to stop the whole run early). On the *last* phase, this instead means how long the whole run lasts before automatically shutting down; omitted there means no automatic stop. Omitted on any earlier phase means that phase — and therefore the run — never advances past it, so every non-last phase should set this.
 
+The fields above are all per-phase: each one applies from the phase that
+sets it onward, and a later phase overrides or reverts it. The economics/
+proof-of-work fields below are different — **fixed for the whole run,
+resolved once from phase 0 only.** Every node re-derives the expected
+target/reward for every block, including historical ones, purely from a
+block's height and these values, so changing one mid-run would make
+already-mined blocks fail re-validation; setting one on a later phase is
+logged as a warning and ignored. All default to real Bitcoin's own numbers
+except `InitialDifficultyShift`, which deliberately can't be (see [What
+this is not](#what-this-is-not)):
+
+- `RetargetIntervalBlocks` / `TargetSecondsPerBlock` — how often (in blocks) difficulty retargets, and how long a block "should" take on average. Default `2016` / `600` (10 minutes).
+- `MinAdjustmentFactor` / `MaxAdjustmentFactor` — clamp on how much a single retarget can swing the target. Default `0.25` / `4.0` (already real Bitcoin's own clamp).
+- `InitialDifficultyShift` — starting difficulty (higher = harder). Default `8` — see [What this is not](#what-this-is-not) for why this one stays simulation-scaled.
+- `InitialBlockReward` / `HalvingIntervalBlocks` — coinbase reward for the first block, and how often (in blocks) it halves. Default `50` / `210000`.
+- `MaxSupply` — hard cap on total coins ever minted. Default `21000000` — with the default `InitialBlockReward`/`HalvingIntervalBlocks` pair, the halving series actually converges to this asymptotically, so the cap binds for real, not just in theory.
+
 Included scenarios, in [`Scenarios/`](Scenarios/):
 
 | File | Demonstrates |
@@ -329,18 +353,26 @@ reconstructing reports or charting a run's progression over time.
 
 ## What this is not
 
-- Mining difficulty is tiny compared to real Bitcoin (tunable via
-  `ProofOfWork.InitialDifficultyShift`) — this demonstrates the mechanism,
-  not a real proof-of-work barrier.
+- Mining difficulty is tiny compared to real Bitcoin (scenario-configurable
+  via `InitialDifficultyShift`, see [Scenarios](#scenarios)), and
+  deliberately can't be matched to it — mining only gets a bounded number of
+  attempts per turn (a node's `HashPower`), not the unbounded,
+  massively-parallel search a real miner performs, so real difficulty would
+  make a block practically unmineable here. This demonstrates the
+  mechanism, not a real proof-of-work barrier — see the retargeting note in
+  `ProofOfWork.InitialDifficultyShift`'s comment for what happens when this
+  is combined with the (default, real) retarget cadence.
 - All nodes run in a single process on `localhost`; there's no real network,
   transport security, or peer discovery.
 - Node identity (`NodeIdentityRegistry`) is bootstrapped in-memory, standing
   in for whatever a real network would use (a genesis validator list, an
   on-chain registration transaction, a PKI).
-- With the toy-scaled halving schedule (halving every 210 blocks at the same
-  50-coin initial reward), the reward series naturally converges to 21,000
-  coins, not the enforced 21,000,000-coin cap — the cap is real but doesn't
-  end up binding with these particular numbers.
+- The halving schedule/retarget-cadence/max-supply fields are consensus
+  economics — see the note atop their fields in `Scenario.cs` — so unlike
+  every other scenario field, they're fixed for the whole run rather than
+  changeable phase to phase: changing one mid-run would make already-mined
+  blocks fail re-validation for any node that saw the new value applied
+  retroactively.
 - A node's outbound peers are chosen once, at creation, and never rotate or
   get evicted for the rest of the run — real Bitcoin periodically refreshes
   connections. There's also no cap on inbound connections (real Bitcoin

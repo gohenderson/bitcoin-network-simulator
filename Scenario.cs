@@ -9,7 +9,7 @@ namespace BitcoinNetworkSimulator
 {
     // ------------------------------------------------------------------
     // Declarative description of one phase of a run — see "Scenarios" in
-    // README.md. A scenario *file* is a JSON array of these, applied in
+    // README.md. A scenario *file* is a YAML list of these, applied in
     // order: phase 0's settings and NodeGroups take effect immediately,
     // and each later phase's settings/NodeGroups take over once the
     // previous phase's DurationSeconds elapses — letting a single run
@@ -120,6 +120,31 @@ namespace BitcoinNetworkSimulator
         // the previous phase's value (NodeNetwork.DefaultChurnMinNodes, 1,
         // for phase 0 — mining needs at least one node to make progress).
         public int? ChurnMinNodes { get; set; }
+
+        // ------------------------------------------------------------------
+        // Consensus economics/proof-of-work — UNLIKE every field above, these
+        // are NOT per-phase and NOT inherited: every node uses
+        // ProofOfWork.ComputeExpectedTargetHex / Economics.ComputeBlockReward
+        // to independently re-derive the expected target/reward for EVERY
+        // block, including historical ones, purely from a block's height and
+        // these process-wide values — so changing one mid-run would make
+        // already-mined blocks fail re-validation for any node that sees the
+        // new value applied retroactively. Program resolves these ONCE, from
+        // phase 0 only; setting any of them on a later phase is a
+        // scenario-authoring mistake (logged as a warning, then ignored).
+        // Null means the corresponding ProofOfWork/Economics Default*
+        // constant — real Bitcoin's own numbers, except InitialDifficultyShift
+        // (see its comment in Blockchain.cs for why that one deliberately
+        // isn't).
+        // ------------------------------------------------------------------
+        public int? RetargetIntervalBlocks { get; set; }
+        public double? TargetSecondsPerBlock { get; set; }
+        public double? MinAdjustmentFactor { get; set; }
+        public double? MaxAdjustmentFactor { get; set; }
+        public int? InitialDifficultyShift { get; set; }
+        public decimal? InitialBlockReward { get; set; }
+        public int? HalvingIntervalBlocks { get; set; }
+        public decimal? MaxSupply { get; set; }
 
         // Each entry describes Count identically-configured nodes to add
         // when this phase begins, applied in the order listed and added on

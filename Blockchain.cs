@@ -69,30 +69,54 @@ namespace BitcoinNetworkSimulator
     public static class ProofOfWork
     {
         // How often (in blocks) to retarget, and how long a block "should" take
-        // on average. Tuned small/fast for a toy demo, unlike Bitcoin's real
-        // 2016-block / ~2-week retarget window and 10-minute block target.
-        public const int RetargetIntervalBlocks = 10;
-        public const double TargetSecondsPerBlock = 3.0;
+        // on average. Default to real Bitcoin's own numbers (2016-block / ~2-week
+        // retarget window, 10-minute block target) — scenario-configurable via
+        // RetargetIntervalBlocks/TargetSecondsPerBlock (see "Scenarios" in
+        // README.md) for a faster-paced run. Consensus-critical: every node
+        // uses these same two values to independently recompute the SAME
+        // expected target for a given height, so they're fixed for the whole
+        // run (resolved once from phase 0, not phase-mutable like growth/churn
+        // — see the note atop Scenario.cs) rather than something that could
+        // drift node to node or block to block.
+        public const int DefaultRetargetIntervalBlocks = 2016;
+        public static int RetargetIntervalBlocks = DefaultRetargetIntervalBlocks;
+        public const double DefaultTargetSecondsPerBlock = 600.0;
+        public static double TargetSecondsPerBlock = DefaultTargetSecondsPerBlock;
 
         // Bitcoin-style clamp so a single retarget can't swing wildly in either
-        // direction, even if the last interval's timing was a fluke.
-        public const double MinAdjustmentFactor = 0.25;
-        public const double MaxAdjustmentFactor = 4.0;
+        // direction, even if the last interval's timing was a fluke — already
+        // real Bitcoin's own clamp, scenario-configurable via
+        // MinAdjustmentFactor/MaxAdjustmentFactor same as above.
+        public const double DefaultMinAdjustmentFactor = 0.25;
+        public static double MinAdjustmentFactor = DefaultMinAdjustmentFactor;
+        public const double DefaultMaxAdjustmentFactor = 4.0;
+        public static double MaxAdjustmentFactor = DefaultMaxAdjustmentFactor;
 
         // Higher = harder (lower per-attempt success probability, slower
-        // blocks). Lower = easier (faster blocks, good for a quick demo).
-        // Chosen much lower than an unbounded search would need, because
-        // MineBlock only gets a bounded number of attempts per turn (a
-        // node's HashPower — see the "Mining" note in README.md): at shift 8,
-        // a single attempt succeeds with probability 1/256, so a regular
-        // (HashPower 1) node still has a real, if modest, chance each turn,
-        // while a node with HashPower 1000 succeeds on the vast majority of
-        // its turns — exactly the "1000x more likely to win" effect
-        // simulated hash power is meant to produce.
-        public const int InitialDifficultyShift = 8;
+        // blocks). Lower = easier. Deliberately NOT matched to real Bitcoin's
+        // actual difficulty — real difficulty would make a block practically
+        // unmineable here, since MineBlock only gets a bounded number of
+        // attempts per turn (a node's HashPower — see the "Mining" note in
+        // README.md) rather than the unbounded, massively-parallel search a
+        // real miner performs. At the default shift 8, a single attempt
+        // succeeds with probability 1/256, so a regular (HashPower 1) node
+        // still has a real, if modest, chance each turn, while a node with
+        // HashPower 1000 succeeds on the vast majority of its turns — exactly
+        // the "1000x more likely to win" effect simulated hash power is meant
+        // to produce. Scenario-configurable via InitialDifficultyShift, same
+        // fixed-for-the-whole-run rule as above — raising it combined with
+        // real RetargetIntervalBlocks/TargetSecondsPerBlock is itself a
+        // network-effect worth observing: retargeting on Bitcoin's real
+        // cadence against hash power that isn't Bitcoin's real magnitude
+        // pushes difficulty to keep climbing every interval, since blocks
+        // keep arriving faster than the 10-minute goal expects.
+        public const int DefaultInitialDifficultyShift = 8;
+        public static int InitialDifficultyShift = DefaultInitialDifficultyShift;
 
         public static readonly BigInteger MaxTarget = (BigInteger.One << 256) - 1;
-        public static readonly BigInteger InitialTarget = MaxTarget >> InitialDifficultyShift;
+        // Computed, not cached at type-init, so setting InitialDifficultyShift
+        // from a scenario before this is first read takes effect.
+        public static BigInteger InitialTarget => MaxTarget >> InitialDifficultyShift;
 
         public static BigInteger HashToBigInteger(string hex)
         {
@@ -127,13 +151,14 @@ namespace BitcoinNetworkSimulator
         // identically, the same way every real Bitcoin node independently
         // recomputes the same expected difficulty from block timestamps.
         //
-        // Known toy quirk, left in deliberately rather than engineered around:
+        // Known quirk, left in deliberately rather than engineered around:
         // genesis has a fixed, hardcoded timestamp (see CreateGenesisBlock), so
-        // the very FIRST retarget interval spans from that fixed point to whenever
-        // you actually ran the demo — a huge apparent elapsed time. That first
-        // retarget will almost always saturate the MaxAdjustmentFactor clamp
-        // (target gets 4x easier). Every retarget after that behaves normally,
-        // based purely on real elapsed mining time between real blocks.
+        // the very FIRST retarget interval spans from that fixed point to
+        // whenever the run actually started — a huge apparent elapsed time.
+        // That first retarget will almost always saturate the
+        // MaxAdjustmentFactor clamp (target gets 4x easier). Every retarget
+        // after that behaves normally, based purely on real elapsed mining
+        // time between real blocks.
         public static string ComputeExpectedTargetHex(List<Block> ancestors)
         {
             if (ancestors == null || ancestors.Count == 0)
@@ -171,25 +196,27 @@ namespace BitcoinNetworkSimulator
     // independently verifies the SAME expected reward for any given block
     // without trusting the builder's claim.
     //
-    // ARITHMETIC NOTE, worth being upfront about: real Bitcoin's constants
-    // (50 coins, halving every 210,000 blocks) are tuned so the reward series
-    // converges to exactly 21,000,000: 210,000 * 50 * (1 + 1/2 + 1/4 + ...) =
-    // 210,000 * 50 * 2 = 21,000,000. Here, halving every 210 blocks (instead of
-    // 210,000 — scaled down 1000x for a fast demo) with the SAME 50-coin reward
-    // converges to only 210 * 50 * 2 = 21,000 total coins — the natural
-    // asymptotic supply is 21,000, not 21,000,000. MaxSupply below is still
-    // implemented as a real, enforced hard cap (and the check exists exactly
-    // like it would in a "real" implementation), it's just that with these
-    // particular numbers the halving schedule alone will never actually reach
-    // it — the cap is a ceiling far above what mining could ever produce. If you
-    // want the cap to actually bind, either shrink MaxSupply to match (21,000)
-    // or scale HalvingIntervalBlocks up to 210,000 to match real Bitcoin's ratio.
+    // ARITHMETIC NOTE, worth being upfront about: the defaults below are real
+    // Bitcoin's own constants, tuned so the reward series converges to
+    // exactly MaxSupply: HalvingIntervalBlocks * InitialBlockReward *
+    // (1 + 1/2 + 1/4 + ...) = 210,000 * 50 * 2 = 21,000,000 — so the cap
+    // actually binds (asymptotically) at these defaults, not just in theory.
+    // All three are scenario-configurable (see "Scenarios" in README.md) for
+    // a faster-paced run — e.g. halving every 210 blocks instead of 210,000
+    // reaches the same-shaped reward curve 1000x sooner, but then the series
+    // only converges to 210 * 50 * 2 = 21,000, so MaxSupply would need
+    // shrinking to match if you want the cap to actually bind again.
+    // Consensus-critical, same fixed-for-the-whole-run rule as
+    // ProofOfWork's RetargetIntervalBlocks/TargetSecondsPerBlock above.
     public static class Economics
     {
         public const string CoinbaseSender = "coinbase";
-        public const decimal InitialBlockReward = 50m;
-        public const int HalvingIntervalBlocks = 210;
-        public const decimal MaxSupply = 21_000_000m;
+        public const decimal DefaultInitialBlockReward = 50m;
+        public static decimal InitialBlockReward = DefaultInitialBlockReward;
+        public const int DefaultHalvingIntervalBlocks = 210_000;
+        public static int HalvingIntervalBlocks = DefaultHalvingIntervalBlocks;
+        public const decimal DefaultMaxSupply = 21_000_000m;
+        public static decimal MaxSupply = DefaultMaxSupply;
 
         // Schedule-only reward for a given height, ignoring the max-supply cap.
         public static decimal NominalBlockReward(int height)
