@@ -1,4 +1,9 @@
-- Description: '15 nodes, fixed: 10 plain solo miners plus a 5-member pool (''cooperative'') at HashPower 50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity instead of five separate weaker shots, and splits its reward proportionally among members.'
+# yaml-language-server: $schema=./scenario.schema.json
+- Description: >-
+    15 nodes, fixed: 10 plain solo miners plus a 5-member pool ('cooperative') at HashPower
+    50 each. Demonstrates MINING POOLS: the pool mines as one combined 250-strong entity
+    instead of five separate weaker shots, and splits its reward proportionally among
+    members.
   DurationSeconds: 900
   AutoGrowth: false
   NodeGroups:

@@ -1,4 +1,7 @@
-- Description: 'Small, fast sanity check: a handful of modest miners, organic growth left on, short duration. Good first scenario to confirm everything works.'
+# yaml-language-server: $schema=./scenario.schema.json
+- Description: >-
+    Small, fast sanity check: a handful of modest miners, organic growth left on, short
+    duration. Good first scenario to confirm everything works.
   DurationSeconds: 120
   AutoGrowth: true
   NodeGroups:

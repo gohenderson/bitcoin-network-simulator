@@ -1,4 +1,8 @@
-- Description: 'One dominant solo miner (HashPower 1000) against nine regular ones (HashPower 1 each), fixed at 10 nodes. Demonstrates SIMULATED HASH POWER: the dominant node wins proportionally more often, not deterministically every time.'
+# yaml-language-server: $schema=./scenario.schema.json
+- Description: >-
+    One dominant solo miner (HashPower 1000) against nine regular ones (HashPower 1 each),
+    fixed at 10 nodes. Demonstrates SIMULATED HASH POWER: the dominant node wins
+    proportionally more often, not deterministically every time.
   DurationSeconds: 180
   AutoGrowth: false
   NodeGroups:

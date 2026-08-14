@@ -153,6 +153,20 @@ field-by-field format. Single-phase example (a plain list of one):
     - { Count: 5, Role: Honest, HashPower: 50, CanMine: true, Pool: cooperative }
 ```
 
+A `Description` longer than a line or two reads better as a folded block
+scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
+convention: wrap the prose at a reasonable column width, and YAML folds the
+line breaks back into single spaces at parse time, so the value is exactly
+the same string either way.
+
+```yaml
+- Description: >-
+    15 nodes, fixed: 10 plain solo miners plus a 5-member pool. Demonstrates
+    MINING POOLS: the pool mines as one combined entity instead of five
+    separate weaker shots, and splits its reward proportionally among members.
+  DurationSeconds: 900
+```
+
 Multi-phase example — a slow genesis era, then pools emerge, then growth
 stops and nodes start churning, running indefinitely once fully mature:
 
@@ -186,6 +200,22 @@ stops and nodes start churning, running indefinitely once fully mature:
   ChurnRate: 0.05
   ChurnMinNodes: 20
 ```
+
+**Editor autocomplete.** [`Scenarios/scenario.schema.json`](Scenarios/scenario.schema.json)
+is a JSON Schema for the format above — every field's type, valid range, and
+the same documentation as `Scenario.cs`'s doc comments, surfaced as
+autocomplete and on-hover tooltips in an editor with YAML language server
+support (e.g. VS Code's [YAML extension](https://marketplace.visualstudio.com/items?itemName=redhat.vscode-yaml)).
+Each file in `Scenarios/` opts in via a leading modeline comment:
+
+```yaml
+# yaml-language-server: $schema=./scenario.schema.json
+```
+
+A new scenario file needs that same line (adjust the relative path if it
+lives outside `Scenarios/`) to get the same autocomplete and inline
+validation — e.g. a typo'd field name or an invalid `Role` value gets
+flagged in the editor before the file is ever run.
 
 Per-phase fields:
 
