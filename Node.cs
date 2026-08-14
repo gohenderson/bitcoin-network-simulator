@@ -57,6 +57,12 @@ namespace BitcoinNetworkSimulator
 
     public class Node
     {
+        // Carries the sending node's own Id on every /receiveBlock and
+        // /receiveChain POST — see the "Peer discouragement" note in
+        // README.md. There's no persistent TCP connection to key a sender off
+        // of the way real Bitcoin does; this header is the stand-in.
+        public const string SenderIdHeaderName = "X-Sender-Id";
+
         public string Id { get; }
         public Blockchain Chain { get; }
         public ConcurrentQueue<Transaction> Mempool { get; }
@@ -64,9 +70,10 @@ namespace BitcoinNetworkSimulator
         private readonly ChainWatcher _watcher;
         private readonly int _serverPort;
         private readonly Func<List<string>> _getPeerIds;
+        private readonly Action<string> _discouragePeer;
         private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
 
-        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, int serverPort, Func<List<string>> getPeerIds)
+        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, int serverPort, Func<List<string>> getPeerIds, Action<string> discouragePeer)
         {
             Id = id;
             Chain = chain;
@@ -74,6 +81,7 @@ namespace BitcoinNetworkSimulator
             _watcher = watcher;
             _serverPort = serverPort;
             _getPeerIds = getPeerIds;
+            _discouragePeer = discouragePeer;
         }
 
         // `route` is the request path with this node's id segment already
@@ -141,13 +149,20 @@ namespace BitcoinNetworkSimulator
 
                     case "/receiveBlock" when req.HttpMethod == "POST":
                         {
+                            var senderId = req.Headers[SenderIdHeaderName];
+                            if (!IsStillAPeer(senderId, out responseBody))
+                            {
+                                res.StatusCode = 403;
+                                break;
+                            }
+
                             using var reader = new StreamReader(req.InputStream);
                             var body = await reader.ReadToEndAsync();
                             var block = JsonSerializer.Deserialize<Block>(body,
                                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                             if (block != null)
                             {
-                                var (ok, reason) = Chain.TryAppend(block);
+                                var (ok, reason, attributable) = Chain.TryAppend(block);
                                 if (ok)
                                 {
                                     Console.WriteLine($"[{Id}] accepted block #{block.Index} built by {block.BuiltBy} (validated: parent + target + hash + coinbase + tx checks passed)");
@@ -159,6 +174,7 @@ namespace BitcoinNetworkSimulator
                                 {
                                     Console.WriteLine($"[{Id}] REJECTED block #{block.Index} from {block.BuiltBy}: {reason}");
                                     _watcher.ObserveRejected(Id, block, reason);
+                                    if (attributable) DiscourageSender(senderId, reason);
                                     res.StatusCode = 409;
                                     responseBody = JsonSerializer.Serialize(new { status = "rejected", reason });
                                 }
@@ -173,6 +189,13 @@ namespace BitcoinNetworkSimulator
 
                     case "/receiveChain" when req.HttpMethod == "POST":
                         {
+                            var senderId = req.Headers[SenderIdHeaderName];
+                            if (!IsStillAPeer(senderId, out responseBody))
+                            {
+                                res.StatusCode = 403;
+                                break;
+                            }
+
                             using var reader = new StreamReader(req.InputStream);
                             var body = await reader.ReadToEndAsync();
                             var candidate = JsonSerializer.Deserialize<List<Block>>(body,
@@ -180,7 +203,7 @@ namespace BitcoinNetworkSimulator
 
                             if (candidate != null)
                             {
-                                var (replaced, reason) = Chain.TryReplaceWithLongerChain(candidate);
+                                var (replaced, reason, attributable) = Chain.TryReplaceWithLongerChain(candidate);
 
                                 if (replaced)
                                 {
@@ -191,6 +214,7 @@ namespace BitcoinNetworkSimulator
                                 }
                                 else
                                 {
+                                    if (attributable) DiscourageSender(senderId, reason);
                                     responseBody = JsonSerializer.Serialize(new { status = "ignored", reason });
                                 }
                             }
@@ -220,6 +244,38 @@ namespace BitcoinNetworkSimulator
             }
         }
 
+        // Refuses a request from a peer this node has already discouraged (see
+        // DiscourageSender below) — the closest a stateless HTTP POST can get
+        // to a real node simply refusing a banned peer's connection outright,
+        // before any validation is even attempted. A missing sender id is let
+        // through rather than refused, since there's no one to attribute it
+        // to either way (every current caller does send one).
+        private bool IsStillAPeer(string? senderId, out string rejectionBody)
+        {
+            if (string.IsNullOrEmpty(senderId) || _getPeerIds().Contains(senderId))
+            {
+                rejectionBody = "";
+                return true;
+            }
+            Console.WriteLine($"[{Id}] refused request from {senderId}: no longer a peer (discouraged)");
+            rejectionBody = JsonSerializer.Serialize(new { status = "refused", reason = "not a peer" });
+            return false;
+        }
+
+        // See the "Peer discouragement" note in README.md. Called only for
+        // rejections TryAppend/TryReplaceWithLongerChain flagged
+        // AttributableToSender — a genuine consensus-rule violation in data
+        // senderId itself supplied, not just normal network timing. A missing
+        // senderId (a request that arrived with no attribution) can't be
+        // discouraged.
+        private void DiscourageSender(string? senderId, string reason)
+        {
+            if (string.IsNullOrEmpty(senderId)) return;
+            Console.WriteLine($"[{Id}] discouraging peer {senderId}: {reason}");
+            _watcher.ObserveDiscouraged(Id, senderId, reason);
+            _discouragePeer(senderId);
+        }
+
         // Forwards a block/chain this node just accepted from one peer on to
         // its OTHER peers, so it keeps propagating hop by hop across a peer
         // graph where no single node is connected to everyone — see the
@@ -235,8 +291,12 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveBlock", content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveBlock")
+                    {
+                        Content = new StringContent(json, Encoding.UTF8, "application/json")
+                    };
+                    request.Headers.Add(SenderIdHeaderName, Id);
+                    await _http.SendAsync(request);
                 }
                 catch (Exception ex)
                 {
@@ -253,8 +313,12 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveChain", content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveChain")
+                    {
+                        Content = new StringContent(json, Encoding.UTF8, "application/json")
+                    };
+                    request.Headers.Add(SenderIdHeaderName, Id);
+                    await _http.SendAsync(request);
                 }
                 catch (Exception ex)
                 {

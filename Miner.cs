@@ -452,8 +452,12 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveBlock", content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveBlock")
+                    {
+                        Content = new StringContent(json, Encoding.UTF8, "application/json")
+                    };
+                    request.Headers.Add(Node.SenderIdHeaderName, Id);
+                    var response = await _http.SendAsync(request);
                     if (!response.IsSuccessStatusCode)
                     {
                         var body = await response.Content.ReadAsStringAsync();
@@ -475,8 +479,12 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    var response = await _http.PostAsync($"http://localhost:{_serverPort}/{peerId}/receiveChain", content);
+                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveChain")
+                    {
+                        Content = new StringContent(json, Encoding.UTF8, "application/json")
+                    };
+                    request.Headers.Add(Node.SenderIdHeaderName, Id);
+                    var response = await _http.SendAsync(request);
                     if (!response.IsSuccessStatusCode)
                     {
                         var body = await response.Content.ReadAsStringAsync();

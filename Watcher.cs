@@ -126,6 +126,14 @@ namespace BitcoinNetworkSimulator
             _store.InsertEvent(DateTime.UtcNow, "reorganization", nodeId, reason: reason);
         }
 
+        // See the "Peer discouragement" note in README.md — nodeId dropped
+        // peerId from its own peer set after peerId sent it something that
+        // failed nodeId's own validation for reasons attributable to peerId.
+        public void ObserveDiscouraged(string nodeId, string peerId, string reason)
+        {
+            _store.InsertEvent(DateTime.UtcNow, "peer-discouraged", nodeId, reason: $"discouraged peer {peerId}: {reason}");
+        }
+
         public async Task<WatcherSnapshot> AuditAsync(bool emitTransitions = true)
         {
             List<string> nodeIds;

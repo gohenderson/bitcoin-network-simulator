@@ -591,25 +591,37 @@ namespace BitcoinNetworkSimulator
             return ValidateChain(candidate, height => candidate[height].Rules);
         }
 
-        public (bool Ok, string Reason) TryAppend(Block block)
+        // `AttributableToSender` distinguishes a rejection reason that reflects
+        // an actual consensus-rule violation in the data itself (bad PoW, bad
+        // coinbase, bad signature, bad tx, wrong genesis — anything ValidateChain
+        // catches) from one that's just normal network timing (we're already
+        // past this index, this doesn't build on our current tip, the candidate
+        // isn't longer than what we have). A validating peer should never have
+        // relayed something that fails the former without having caught it
+        // itself first, so — mirroring real Bitcoin Core's discouragement
+        // filter, which acts on the first genuine consensus violation rather
+        // than accumulating a numeric ban score — only the former is grounds
+        // for a caller to discourage whoever sent it. See the "Peer
+        // discouragement" note in README.md.
+        public (bool Ok, string Reason, bool AttributableToSender) TryAppend(Block block)
         {
             lock (_lock)
             {
                 var tip = Blocks[^1];
 
                 if (block.Index != tip.Index + 1)
-                    return (false, $"expected index {tip.Index + 1}, got {block.Index}");
+                    return (false, $"expected index {tip.Index + 1}, got {block.Index}", false);
 
                 if (block.PreviousHash != tip.Hash)
-                    return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}");
+                    return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}", false);
 
                 var candidate = new List<Block>(Blocks) { block };
                 var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
                 if (!validation.Ok)
-                    return validation;
+                    return (false, validation.Reason, true);
 
                 Blocks.Add(block);
-                return (true, "ok");
+                return (true, "ok", false);
             }
         }
 
@@ -618,22 +630,24 @@ namespace BitcoinNetworkSimulator
         // coinbase correctness) replaces our current chain only when it is
         // strictly longer. This lets a node undo blocks it previously accepted
         // when another branch proves to be the longer valid history.
-        public (bool Replaced, string Reason) TryReplaceWithLongerChain(List<Block> candidate)
+        //
+        // See TryAppend's comment above for what `AttributableToSender` means.
+        public (bool Replaced, string Reason, bool AttributableToSender) TryReplaceWithLongerChain(List<Block> candidate)
         {
             lock (_lock)
             {
                 var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
                 if (!validation.Ok)
-                    return (false, $"candidate rejected: {validation.Reason}");
+                    return (false, $"candidate rejected: {validation.Reason}", true);
 
                 if (candidate.Count <= Blocks.Count)
-                    return (false, $"candidate is not longer (candidate={candidate.Count - 1}, local={Blocks.Count - 1})");
+                    return (false, $"candidate is not longer (candidate={candidate.Count - 1}, local={Blocks.Count - 1})", false);
 
                 if (candidate[0].Hash != Blocks[0].Hash)
-                    return (false, "candidate has a different genesis block");
+                    return (false, "candidate has a different genesis block", true);
 
                 Blocks = new List<Block>(candidate);
-                return (true, $"replaced local chain with longer chain at height {Blocks[^1].Index}");
+                return (true, $"replaced local chain with longer chain at height {Blocks[^1].Index}", false);
             }
         }
 

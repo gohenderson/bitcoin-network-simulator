@@ -56,6 +56,22 @@ behaviors — not to be a secure or production-grade implementation. See
   other peers, so it still reaches the whole network hop by hop as long as
   the peer graph is connected. See `NodeNetwork.cs` and the "Peer
   topology" fields under [Scenarios](#scenarios).
+- **Peer discouragement.** Real Bitcoin nodes never compare consensus rules
+  up front — there's no such field in the handshake — they discover a
+  disagreement lazily, the first time a peer actually sends something that
+  fails their own validation. This simulator models the same thing: every
+  block/chain a node receives is tagged with the sending peer's id
+  (`Node.SenderIdHeaderName`), and a rejection that reflects a genuine
+  consensus-rule violation in the data itself — not just normal network
+  timing like a stale height or a chain that isn't longer yet —
+  (`Blockchain.TryAppend`/`TryReplaceWithLongerChain`'s `AttributableToSender`)
+  makes the receiving node immediately drop that peer from its own outbound
+  set (`NodeNetwork.DiscouragePeer`) and refuse any further requests it
+  sends. This is one-directional, same as a real node simply refusing a
+  discouraged peer's connection attempts without that peer necessarily
+  knowing why — it doesn't ripple out to anyone else's peer graph. A
+  discouragement is recorded as a `peer-discouraged` event (see [Watching a
+  run](#watching-a-run)).
 - **Coin issuance.** Each block's winning miner earns a coinbase reward,
   starting (by default) at 50 coins and halving every 210,000 blocks, with
   the total ever minted hard-capped at 21,000,000 — real Bitcoin's own

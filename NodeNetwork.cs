@@ -296,8 +296,9 @@ namespace BitcoinNetworkSimulator
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
             Func<List<string>> getPeerIds = () => PeerIdsFor(id);
+            Action<string> discouragePeer = peerId => DiscouragePeer(id, peerId);
             var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
-            var node = new Node(id, chain, mempool, watcher, _port, getPeerIds);
+            var node = new Node(id, chain, mempool, watcher, _port, getPeerIds, discouragePeer);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
 
@@ -548,6 +549,22 @@ namespace BitcoinNetworkSimulator
             }
             watcher.RemoveNode(nodeId);
             Console.WriteLine($"[network] node {nodeId} left (churn)");
+        }
+
+        // Peer discouragement (see the "Peer discouragement" note in
+        // README.md): unlike RemoveNode, this is deliberately one-directional
+        // — it only drops peerId out of nodeId's own edge set, mirroring a
+        // real node that stops dialing/relaying to a peer it has discouraged
+        // without that peer necessarily knowing it's been dropped. The peer's
+        // own edge set (and therefore its future outbound attempts toward
+        // nodeId) is untouched; Node's receive handlers refuse those directly.
+        public void DiscouragePeer(string nodeId, string peerId)
+        {
+            lock (_lock)
+            {
+                if (_peerIdsByNodeId.TryGetValue(nodeId, out var mySet))
+                    mySet.Remove(peerId);
+            }
         }
     }
 }
