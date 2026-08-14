@@ -38,4 +38,4 @@ safety checks below.
 
 8. If the commit fails because a pre-commit hook rejected it, do not bypass the hook. Report the hook's output to the user, fix the underlying issue only if it's obvious and small, re-stage, and create a new commit — never amend a commit that didn't actually happen.
 
-9. On success, run `git status --short` to confirm a clean tree and report the resulting commit hash and subject line back to the user. Mention that `COMMIT_MESSAGE.txt` still holds the message just used, in case they want to clear it before drafting the next one.
+9. On success, run `git status --short` to confirm a clean tree and report the resulting commit hash and subject line back to the user. Then clear the contents of `COMMIT_MESSAGE.txt` so it doesn't contain the message just used.
