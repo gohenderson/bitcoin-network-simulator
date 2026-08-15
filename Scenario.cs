@@ -40,6 +40,15 @@ namespace BitcoinNetworkSimulator
         // as ScenarioNodeGroup.ResolvedRuleSchedule. This is what
         // NodeNetwork actually reads.
         public List<ResolvedDefaultRuleScheduleEntry> ResolvedDefaultRuleSchedule { get; set; } = new();
+
+        // Whole-run, file-wide $ debasement rate, compounded per block —
+        // see "Debasement" in README.md. Lives at the file root, not per
+        // NodeGroup or per NodeRules entry: every node's ValueSeeking $
+        // comparisons and every node's CostOfLiving/CostPerAttempt/
+        // HashPowerCost checks only make sense if they all share ONE
+        // currency, so this can't vary by node or by ruleset. Default 0
+        // disables it entirely (today's behavior, unchanged).
+        public decimal DebasementRatePerBlock { get; set; } = 0m;
     }
 
     // ------------------------------------------------------------------

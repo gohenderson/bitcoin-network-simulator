@@ -158,8 +158,9 @@ unknown node id gets a 404 before the request ever reaches a node.
 ## Scenarios
 
 A scenario file is a YAML mapping with a top-level **`Phases`** list, an
-optional top-level **`NodeRules`** list, and an optional top-level
-**`DefaultRuleSchedule`** list. `Phases` is the run's timeline,
+optional top-level **`NodeRules`** list, an optional top-level
+**`DefaultRuleSchedule`** list, and an optional top-level
+**`DebasementRatePerBlock`** number (see "Debasement" below). `Phases` is the run's timeline,
 applied in order: phase 0's settings and `NodeGroups` take effect
 immediately; each later phase's settings and `NodeGroups` take over once
 the previous phase's `DurationSeconds` elapses — so a single run can model
@@ -469,6 +470,41 @@ odds clear the threshold and it mines solo the whole run, while several
 low-`HashPower` nodes' odds don't and they each join a shared pool as soon
 as they get a turn.
 
+**Debasement.** Every $ figure above — `PriceSchedule`'s prices,
+`CostPerAttempt`, `CostOfLiving`, `HashPowerCost` — is authored as a
+real, today's-dollars amount. A top-level (not per-`NodeGroup`, not
+per-`NodeRules`) `DebasementRatePerBlock` (default `0`, disabling this
+entirely) nominally inflates all of them by the same compounding factor,
+`(1 + rate) ^ height`, computed once by `RuleSchedule.DebasementFactorAt`
+and applied wherever a $ figure is read: `PriceSchedule` lookups, and each
+of the three cost checks. It's file-wide rather than a per-node knob like
+`CostOfLiving` itself, because every node's $ comparisons — `ValueSeeking`
+choosing between candidates, a cost check against `BestValueAt` — only
+make sense if the whole scenario shares one currency; letting two nodes
+debase at different rates would be modeling two different currencies, not
+one inflating one. `StartingCapital` is deliberately the one $ figure left
+alone: it's a cash *stock* a node is already holding, not a recurring
+price re-quoted every block, and letting its real value erode under
+debasement (rather than topping up its nominal number to match) is the
+actual point — the same real-world reason holding cash is a bad hedge
+against inflation.
+
+A non-obvious consequence: debasement compounds by chain HEIGHT, not
+wall-clock time or turns spent waiting, and a win's coins get revalued at
+whatever the CURRENT (highest-so-far) debased price is the instant they're
+counted — so a node that wins even occasionally is remarkably resistant to
+debasement bankrupting it (its net worth's growth outpaces its accrued
+bill's). The real danger is a node that goes a long stretch WITHOUT
+winning while the height it shares with everyone else — including much
+bigger, frequently-winning peers — races ahead regardless, debasing its
+bills long before it has anything to show for them. See
+`Scenarios/mining-debasement.yaml`: a tiny `HashPower: 1` node with a
+`CostOfLiving` that would need ~66 turns to exhaust its `StartingCapital`
+at `DebasementRatePerBlock: 0` instead goes bankrupt within its first few
+turns — having never won a single block — purely because a `HashPower: 200`
+peer sharing the same chain pushes height, and therefore debasement, up
+fast. The big peer, with no `CostOfLiving` to erode, mines on unaffected.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -603,6 +639,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `mining-bankruptcy.yaml` | Two `ValueSeeking` nodes mine the same ruleset with very different `CostOfLiving` — one comfortably outearns its overhead and survives indefinitely, the other's overhead structurally exceeds even its best-case income and it's forced out of the network (churned) once accrued cost exceeds its on-chain net worth. |
 | `mining-reinvestment.yaml` | Two identical `ValueSeeking` nodes mine the same ruleset, but one reinvests earned profit into `+HashPower` — its win probability (and therefore income) compounds upward over the run while a fixed-`HashPower` control node's stays flat. |
 | `mining-pool-adoption.yaml` | A high-`HashPower` node's own solo win probability already clears `PoolAdoptionThreshold`, so it mines solo the whole run; several low-`HashPower` nodes' odds don't, so each joins a shared pool — optimizing for realization, not expected value — as soon as it gets a turn. |
+| `mining-debasement.yaml` | A tiny node's `CostOfLiving` would need ~66 turns to exhaust its `StartingCapital` undebased, but a big peer sharing its chain pushes height (and therefore debasement) up fast enough to bankrupt it within its first few turns, having never won a block — while the big peer, with no `CostOfLiving` to erode, mines on unaffected. |
 
 ## Node roles
 

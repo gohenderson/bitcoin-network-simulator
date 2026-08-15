@@ -302,11 +302,22 @@ namespace BitcoinNetworkSimulator
         private readonly List<RuleScheduleEntry> _entries; // static mode; empty in value-seeking mode
         private readonly List<ValueSeekingCandidate> _valueSeekingCandidates; // value-seeking mode; empty in static mode
         private readonly int _hashPower; // value-seeking mode only; unused in static mode
+        // Whole-run, file-wide $ debasement rate per block — see
+        // ScenarioFile.DebasementRatePerBlock and "Debasement" in
+        // README.md. Deliberately the SAME value on every node's
+        // RuleSchedule regardless of mode or candidate set: a ValueSeeking
+        // node's cross-ruleset $ comparison only makes sense if every
+        // candidate (and every other node) shares one currency, so this
+        // can't vary per-node or per-ruleset the way PriceSchedule itself
+        // does. 0 (default) disables it entirely — DebasementFactorAt
+        // always returns 1.
+        private readonly decimal _debasementRatePerBlock;
 
-        public RuleSchedule(IEnumerable<RuleScheduleEntry> entries)
+        public RuleSchedule(IEnumerable<RuleScheduleEntry> entries, decimal debasementRatePerBlock)
         {
             _entries = entries.OrderBy(e => e.FromHeight).ToList();
             _valueSeekingCandidates = new List<ValueSeekingCandidate>();
+            _debasementRatePerBlock = debasementRatePerBlock;
         }
 
         // Value-seeking mode: instead of one author-scripted timeline, RulesForHeight
@@ -322,13 +333,14 @@ namespace BitcoinNetworkSimulator
         // random or hidden), so any two nodes that share both a candidate set AND a
         // hashPower still always agree, the same way ProofOfWork/Economics' own
         // recomputed-not-trusted values do.
-        public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates, int hashPower)
+        public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates, int hashPower, decimal debasementRatePerBlock)
         {
             _entries = new List<RuleScheduleEntry>();
             _hashPower = hashPower;
             _valueSeekingCandidates = candidates
                 .Select(c => new ValueSeekingCandidate { Rules = c.Rules, PriceSchedule = c.PriceSchedule.OrderBy(p => p.FromHeight).ToList() })
                 .ToList();
+            _debasementRatePerBlock = debasementRatePerBlock;
         }
 
         // The ruleset active at `height`: the entry with the highest
@@ -364,6 +376,17 @@ namespace BitcoinNetworkSimulator
         // PriceSchedule data to value its own balance against.
         public bool IsValueSeeking => _valueSeekingCandidates.Count > 0;
 
+        // How much a $ figure authored at height 0 is worth, NOMINALLY, at
+        // `height` — 1 (no change) when DebasementRatePerBlock is 0. See
+        // "Debasement" in README.md. Applied once, here, to every
+        // PriceSchedule lookup below (BestCandidateAt) so CurrentPriceAt/
+        // BestValueAt already return nominal, debased $ figures; SoloMiner
+        // applies it separately to its own CostPerAttempt/CostOfLiving/
+        // HashPowerCost at their point of use, since those aren't PriceSchedule
+        // lookups and don't flow through here.
+        public decimal DebasementFactorAt(int height) =>
+            (decimal)Math.Pow((double)(1m + _debasementRatePerBlock), height);
+
         // The price of whichever candidate is currently most profitable — 0m in
         // static mode (no PriceSchedule concept to draw from). Used by SoloMiner
         // to value its own on-chain balance in $ terms for the cost-of-living
@@ -390,9 +413,10 @@ namespace BitcoinNetworkSimulator
             ConsensusRules? best = null;
             var bestValue = 0m;
             var bestPrice = 0m;
+            var debasement = DebasementFactorAt(height);
             foreach (var candidate in _valueSeekingCandidates)
             {
-                var price = PriceAt(candidate.PriceSchedule, height);
+                var price = PriceAt(candidate.PriceSchedule, height) * debasement;
                 var winProbability = ProofOfWork.WinProbability(_hashPower, candidate.Rules.InitialDifficultyShift);
                 var value = (decimal)winProbability * Economics.NominalBlockReward(height, candidate.Rules) * price;
                 if (best == null || value > bestValue)
@@ -536,7 +560,7 @@ namespace BitcoinNetworkSimulator
 
         public Blockchain(RuleSchedule? ruleSchedule = null)
         {
-            _ruleSchedule = ruleSchedule ?? new RuleSchedule(Enumerable.Empty<RuleScheduleEntry>());
+            _ruleSchedule = ruleSchedule ?? new RuleSchedule(Enumerable.Empty<RuleScheduleEntry>(), 0m);
             Blocks.Add(CreateGenesisBlock());
         }
 

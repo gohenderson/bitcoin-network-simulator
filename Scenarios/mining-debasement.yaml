@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: modest-chain
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 4
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 5 }
+
+DebasementRatePerBlock: 0.03
+
+Phases:
+  - Description: >-
+      A big miner (HashPower 200, no CostOfLiving) and a tiny one (HashPower 1,
+      CostOfLiving 0.3, StartingCapital 20 — comfortably ~66 turns of margin at
+      DebasementRatePerBlock 0) share one chain. Debasement is driven by HEIGHT,
+      not wall-clock time, so it barely engages while the small node is (rarely)
+      waiting for its own first win — but the big node's frequent wins race the
+      shared chain's height up fast regardless, exponentially inflating the small
+      node's CostOfLiving long before it ever earns anything to offset it. It
+      goes insolvent within its first several turns, having never won a single
+      block, purely from a bill that would have been perfectly sustainable
+      without debasement. The big node, meanwhile, has no CostOfLiving to erode
+      and keeps mining unaffected. Watch for "insolvent" in the console.
+    DurationSeconds: 60
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 1
+        Role: Honest
+        HashPower: 200
+        ValueSeeking: true
+        ValueSeekingCandidates: [modest-chain]
+      - Count: 1
+        Role: Honest
+        HashPower: 1
+        CostOfLiving: 0.3
+        StartingCapital: 20
+        ValueSeeking: true
+        ValueSeekingCandidates: [modest-chain]

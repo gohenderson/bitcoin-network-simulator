@@ -20,6 +20,12 @@
       "type": "array",
       "description": "Controls which RuleSchedule organically-grown nodes follow (organic growth / AutoGrowth-created nodes, and the initial dynamic-start node — never NodeGroups-authored nodes, which always use their own RulesName/RuleSchedule). Each entry is a TRANCHE, active for nodes created at or after its FromHeight: its RuleSchedules array is the full distribution new nodes are drawn from for that stage of the network's growth. A later tranche replaces an earlier one outright once the network reaches it, rather than blending with it. See the ScenarioDefaultRuleScheduleEntry doc comment in Scenario.cs for the full worked examples.",
       "items": { "$ref": "#/definitions/defaultRuleScheduleEntry" }
+    },
+    "DebasementRatePerBlock": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Whole-run $ debasement rate, compounded per block — see \"Debasement\" in README.md. Nominally inflates every $ figure in the scenario (PriceSchedule prices, CostPerAttempt, CostOfLiving, HashPowerCost) but NOT StartingCapital, a cash stock whose real value eroding under debasement is the point, not a recurring price. File-wide, not per NodeGroup or NodeRules entry: every node's $ comparisons (ValueSeeking, mining costs) only make sense if they all share one currency. Default 0 disables it entirely."
     }
   },
   "definitions": {

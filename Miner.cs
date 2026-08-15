@@ -331,6 +331,14 @@ namespace BitcoinNetworkSimulator
             var height = parent.Index + 1;
             var simulatedBalances = Ledger.ComputeBalances(ancestors); // hoisted — reused below AND by the insolvency check
 
+            // Every $ figure below is nominal — multiplied by
+            // DebasementFactorAt(height) at the point of use, the same way
+            // RuleSchedule already applies it to PriceSchedule's own lookups
+            // (BestCandidateAt) — so a scenario's DebasementRatePerBlock
+            // erodes CostOfLiving/CostPerAttempt/HashPowerCost exactly like
+            // it erodes the coin's own $ price. See "Debasement" in README.md.
+            var debasement = _ruleSchedule.DebasementFactorAt(height);
+
             // Cost of living: a FIXED bill owed every turn regardless of whether this
             // node mines, unlike CostPerAttempt (only owed while actively trying
             // nonces) — see "Cost of living" in README.md. Compared against this
@@ -342,7 +350,7 @@ namespace BitcoinNetworkSimulator
             // exceeds cumulative wealth" is the right long-run solvency test.
             if (_costOfLiving > 0m && _ruleSchedule.IsValueSeeking)
             {
-                _accruedLivingCost += _costOfLiving;
+                _accruedLivingCost += _costOfLiving * debasement;
                 var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
                 if (_accruedLivingCost > netWorth + _startingCapital)
                 {
@@ -366,12 +374,13 @@ namespace BitcoinNetworkSimulator
             if (_hashPowerCost > 0m && _ruleSchedule.IsValueSeeking && (_maxHashPower <= 0 || HashPower < _maxHashPower))
             {
                 var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
+                var effectiveHashPowerCost = _hashPowerCost * debasement;
                 var uncommitted = netWorth - _accruedLivingCost - _investedInHashPower;
-                if (uncommitted >= _hashPowerCost)
+                if (uncommitted >= effectiveHashPowerCost)
                 {
-                    _investedInHashPower += _hashPowerCost;
+                    _investedInHashPower += effectiveHashPowerCost;
                     HashPower++;
-                    Console.WriteLine($"[{Id}] reinvesting profit: HashPower {HashPower - 1} -> {HashPower} ({_hashPowerCost} committed, {uncommitted} was available)");
+                    Console.WriteLine($"[{Id}] reinvesting profit: HashPower {HashPower - 1} -> {HashPower} ({effectiveHashPowerCost} committed, {uncommitted} was available)");
                 }
             }
 
@@ -381,10 +390,11 @@ namespace BitcoinNetworkSimulator
             // — it only ever changes whether ANYTHING is worth mining this turn.
             // Mempool transactions are untouched here (dequeued further below,
             // never reached on an idle turn), so nothing is lost by sitting out.
-            if (_costPerAttempt > 0m && _ruleSchedule.BestValueAt(height) <= _costPerAttempt * HashPower)
+            var effectiveCostPerAttempt = _costPerAttempt * debasement;
+            if (_costPerAttempt > 0m && _ruleSchedule.BestValueAt(height) <= effectiveCostPerAttempt * HashPower)
             {
                 if (!_idleLastTurn)
-                    Console.WriteLine($"[{Id}] going idle: no candidate ruleset covers this turn's mining cost ({_costPerAttempt} x {HashPower} = {_costPerAttempt * HashPower})");
+                    Console.WriteLine($"[{Id}] going idle: no candidate ruleset covers this turn's mining cost ({effectiveCostPerAttempt} x {HashPower} = {effectiveCostPerAttempt * HashPower})");
                 _idleLastTurn = true;
                 return;
             }

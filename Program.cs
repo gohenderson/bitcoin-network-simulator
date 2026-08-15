@@ -107,7 +107,7 @@ namespace BitcoinNetworkSimulator
             var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
             var settings = new GrowthSettings().ApplyPhase(phases[0]);
-            var network = new NodeNetwork(RunRootDir, Port, settings.OutboundPeerCount, settings.MaliciousFraction, settings.WalletOnlyFraction, loadedScenarioFile?.ResolvedDefaultRuleSchedule ?? new List<ResolvedDefaultRuleScheduleEntry>());
+            var network = new NodeNetwork(RunRootDir, Port, settings.OutboundPeerCount, settings.MaliciousFraction, settings.WalletOnlyFraction, loadedScenarioFile?.ResolvedDefaultRuleSchedule ?? new List<ResolvedDefaultRuleScheduleEntry>(), loadedScenarioFile?.DebasementRatePerBlock ?? 0m);
 
             // One shared listener for the whole network — see
             // NetworkServer.cs — dispatching every request by the node id in

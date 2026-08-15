@@ -120,6 +120,11 @@ namespace BitcoinNetworkSimulator
         // fields above (ScenarioFile.DefaultRuleSchedule lives at the file
         // root, not per-phase), so this one IS readonly.
         private readonly List<ResolvedDefaultRuleScheduleEntry> _defaultRuleSchedule;
+        // Whole-run, file-wide $ debasement rate — see
+        // ScenarioFile.DebasementRatePerBlock. Passed straight into every
+        // RuleSchedule this network constructs (AddNodeAsync), so it's
+        // readonly for the same reason _defaultRuleSchedule is.
+        private readonly decimal _debasementRatePerBlock;
         private readonly Random _rng = new();
         private readonly Random _peerSelectionRng = new(); // dedicated so peer selection (only ever called from AddNodeAsync's sequential flow) never shares a Random with concurrently-running mining code
         private readonly Random _growthTimingRng = new(); // dedicated so growth-tick jitter never shares a Random with concurrently-running mining/peer-selection code
@@ -149,7 +154,7 @@ namespace BitcoinNetworkSimulator
         private readonly Dictionary<string, HashSet<string>> _peerIdsByNodeId = new();
         private readonly Dictionary<string, int> _economicWeightByNodeId = new();
 
-        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction, List<ResolvedDefaultRuleScheduleEntry> defaultRuleSchedule)
+        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction, List<ResolvedDefaultRuleScheduleEntry> defaultRuleSchedule, decimal debasementRatePerBlock)
         {
             _runRootDir = runRootDir;
             _port = port;
@@ -157,6 +162,7 @@ namespace BitcoinNetworkSimulator
             _maliciousFraction = maliciousFraction;
             _walletOnlyFraction = walletOnlyFraction;
             _defaultRuleSchedule = defaultRuleSchedule;
+            _debasementRatePerBlock = debasementRatePerBlock;
         }
 
         // Called by Program at each phase transition (see "Scenarios" in
@@ -298,8 +304,8 @@ namespace BitcoinNetworkSimulator
             // either way: Blockchain (validation) and SoloMiner (building) both get
             // this one RuleSchedule object.
             var ruleSchedule = metadata.ValueSeekingCandidates.Count > 0
-                ? new RuleSchedule(metadata.ValueSeekingCandidates, metadata.HashPower)
-                : new RuleSchedule(metadata.RuleSchedule);
+                ? new RuleSchedule(metadata.ValueSeekingCandidates, metadata.HashPower, _debasementRatePerBlock)
+                : new RuleSchedule(metadata.RuleSchedule, _debasementRatePerBlock);
             var chain = new Blockchain(ruleSchedule);
             var mempool = new ConcurrentQueue<Transaction>();
             var signingKey = NodeMetadataStore.ImportSigningKey(metadata.SigningKey!);
