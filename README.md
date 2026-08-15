@@ -436,6 +436,39 @@ bound. Only meaningful for a `ValueSeeking` group, same restriction as
 where a reinvesting node's win probability climbs from 7.5% to 17.8% over
 the run while a fixed-`HashPower` control node's stays flat.
 
+**Pool adoption.** Every mechanic above (`ValueSeeking`, `CostOfLiving`,
+reinvestment) maximizes *expected value*. Pool membership doesn't — it
+can't: a proportional share of a bigger pie is never bigger than the pie
+kept whole, so pooling never raises expected coins over solo mining. What
+pooling actually buys is **realization** — turning an effectively-infinite
+wait for a first payout into a small, predictable, frequent one, by
+combining hash power so the *group* wins often and every member takes a
+slice of every group win. A `PoolCandidates` list (a per-`NodeGroups`
+field, default empty — disables reconsideration entirely) makes a node
+re-evaluate, once per turn, whether to stay put or move, using a threshold
+rule instead of an EV comparison: if its own solo win probability
+(`ProofOfWork.WinProbability(HashPower, shift)`) is at or above
+`PoolAdoptionThreshold` (default `0.5`), it stays solo (or leaves any pool
+it's in) — EV wins, and EV always favors solo. Below the threshold,
+realization dominates instead: it joins whichever option — its current
+pool, or a named candidate — maximizes the *group's* win probability,
+dilution be damned, since even a small share of a group that actually wins
+beats a share of one that almost never does. This is why real mining
+farms solo-mine (or run their own pool) while hobbyists flock to large
+public pools: a farm's own odds already clear the bar, a hobbyist's don't.
+Needs no `Price`/`PriceSchedule` data (unlike `ValueSeeking`, `CostOfLiving`,
+and reinvestment) since it only compares win probabilities, not $ value, so
+it works for a fixed-`RulesName` group exactly as well as a `ValueSeeking`
+one. Reconsideration happens once per full round-robin sweep — the same
+cadence every other candidate/height lookup in this codebase gets — and a
+tie (e.g. a candidate pool with no other members yet, mathematically
+identical to staying solo) never triggers a move, so a node never
+spontaneously founds a pointless pool of one. See
+`Scenarios/mining-pool-adoption.yaml`, where a high-`HashPower` node's own
+odds clear the threshold and it mines solo the whole run, while several
+low-`HashPower` nodes' odds don't and they each join a shared pool as soon
+as they get a turn.
+
 A `Description` longer than a line or two reads better as a folded block
 scalar (`>-`) than one unbroken line — see any file in `Scenarios/` for the
 convention: wrap the prose at a reasonable column width, and YAML folds the
@@ -526,6 +559,8 @@ Per-NodeGroup fields:
 - `MaxHashPower` (default `0`, uncapped) — see the "Reinvestment" note above. Upper bound `HashPowerCost`-driven reinvestment can grow a node's `HashPower` to.
 - `CanMine` (default `true`) — see the "Mining participation" note above; `false` makes this group wallet-only.
 - `Pool` (default none — mines solo) — see the "Mining pools" note above.
+- `PoolCandidates` (default empty, reconsideration disabled) — see the "Pool adoption" note above. Names of pools this group reconsiders joining every turn; a name nobody has joined yet is valid, just empty until someone does.
+- `PoolAdoptionThreshold` (default `0.5`) — see the "Pool adoption" note above. Own solo win-probability cutoff below which this group optimizes for realization (join whichever option maximizes the group's win probability) instead of expected value.
 - `EconomicWeight` (default `1`) — see [Peer topology](#how-it-works) above.
 - `RulesName` — shorthand for a single-entry `RuleSchedule` (`{ FromHeight: 0, RulesName }`): this group's consensus/economics ruleset for its whole life, by name from the scenario file's top-level `NodeRules` list (below). Omitted (or a name not defined in `NodeRules`, logged as a warning) means every field below defaults. Ignored (with a warning) if `RuleSchedule` is also set.
 - `RuleSchedule` — this group's full timeline of which named ruleset (from `NodeRules`) is active at which block height, as a list of `{ FromHeight, RulesName }` entries — e.g. `real-bitcoin` from height 0, switching to a different named ruleset from height 6 on. Takes precedence over `RulesName` if both are set.
@@ -567,6 +602,7 @@ Included scenarios, in [`Scenarios/`](Scenarios/):
 | `mining-difficulty-tradeoff.yaml` | Two `ValueSeeking` groups with very different `HashPower` see the exact same prices and rewards but reach opposite conclusions, because expected value also weighs each candidate's `InitialDifficultyShift` — the low-`HashPower` group can't realistically win the harder, richer ruleset and mines the easier one instead. |
 | `mining-bankruptcy.yaml` | Two `ValueSeeking` nodes mine the same ruleset with very different `CostOfLiving` — one comfortably outearns its overhead and survives indefinitely, the other's overhead structurally exceeds even its best-case income and it's forced out of the network (churned) once accrued cost exceeds its on-chain net worth. |
 | `mining-reinvestment.yaml` | Two identical `ValueSeeking` nodes mine the same ruleset, but one reinvests earned profit into `+HashPower` — its win probability (and therefore income) compounds upward over the run while a fixed-`HashPower` control node's stays flat. |
+| `mining-pool-adoption.yaml` | A high-`HashPower` node's own solo win probability already clears `PoolAdoptionThreshold`, so it mines solo the whole run; several low-`HashPower` nodes' odds don't, so each joins a shared pool — optimizing for realization, not expected value — as soon as it gets a turn. |
 
 ## Node roles
 

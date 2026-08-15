@@ -102,11 +102,30 @@ namespace BitcoinNetworkSimulator
         // Cumulative $ already committed to past HashPower purchases — never
         // reset, mirrors _accruedLivingCost; see MineAndBroadcastSingleRoundAsync.
         private decimal _investedInHashPower = 0m;
+        // Names of pools this node reconsiders joining every turn — see
+        // ScenarioNodeGroup.PoolCandidates and ReconsiderPoolMembership.
+        // Empty (default) disables reconsideration entirely.
+        private readonly List<string> _poolCandidates;
+        // Own solo win-probability cutoff below which ReconsiderPoolMembership
+        // optimizes for realization instead of expected value — see
+        // ScenarioNodeGroup.PoolAdoptionThreshold.
+        private readonly decimal _poolAdoptionThreshold;
+        // The pool this node currently believes it belongs to (null = solo) —
+        // mirrors NodeNetwork's own actual placement, kept in sync by
+        // ReconsiderPoolMembership so it never has to ask NodeNetwork what its
+        // own state is. Seeded from ScenarioNodeGroup.Pool at construction.
+        private string? _currentPool;
+        // Looks up a named pool's current total HashPower (0 if it doesn't
+        // exist yet) — see NodeNetwork.GetPoolHashPower.
+        private readonly Func<string, int> _getPoolHashPower;
+        // Moves this node between solo and a named pool (null = solo) — see
+        // NodeNetwork.SwitchPoolMembership.
+        private readonly Action<string?> _requestPoolSwitch;
 
         // `serverPort` is the single port the whole network's NetworkServer
         // listens on (see NetworkServer.cs) — every peer URL this miner
         // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, List<string> poolCandidates, decimal poolAdoptionThreshold, string? initialPool, Func<string, int> getPoolHashPower, Action<string?> requestPoolSwitch, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
@@ -119,6 +138,11 @@ namespace BitcoinNetworkSimulator
             _requestForcedChurn = requestForcedChurn;
             _hashPowerCost = hashPowerCost;
             _maxHashPower = maxHashPower;
+            _poolCandidates = role == NodeRole.Honest ? poolCandidates : new List<string>();
+            _poolAdoptionThreshold = poolAdoptionThreshold;
+            _currentPool = initialPool;
+            _getPoolHashPower = getPoolHashPower;
+            _requestPoolSwitch = requestPoolSwitch;
             _ruleSchedule = ruleSchedule;
             _chain = chain;
             _mempool = mempool;
@@ -148,6 +172,9 @@ namespace BitcoinNetworkSimulator
         // the "Mining" note in README.md.
         public async Task MineOneRoundAsync(CancellationToken token)
         {
+            ReconsiderPoolMembership();
+            if (_currentPool != null) return; // just switched into a pool — scheduled as part of it next sweep instead
+
             try
             {
                 if (_role == NodeRole.Equivocator)
@@ -159,6 +186,62 @@ namespace BitcoinNetworkSimulator
             catch (Exception ex)
             {
                 Console.WriteLine($"[{Id}] mining error: {ex.Message}");
+            }
+        }
+
+        // Called once per this node's own turn — whether currently solo (from
+        // MineOneRoundAsync) or pooled (from PoolMiner.MineOneRoundAsync, for
+        // every member, not just whoever coordinates) — to decide whether to
+        // stay put or move. Below PoolAdoptionThreshold, this node's own solo
+        // win probability is judged too unlikely to ever pay off, so it
+        // optimizes for REALIZATION: join whichever option (including its
+        // current pool) maximizes the GROUP's win probability, ignoring
+        // dilution entirely — a diluted share of a group that actually wins
+        // beats a share of one that almost never does. At or above the
+        // threshold, EV wins instead — which is always solo, since a
+        // proportional share of a bigger pool is never bigger than the
+        // reward kept whole — so it leaves any pool it's in. See "Pool
+        // adoption" in README.md.
+        public void ReconsiderPoolMembership()
+        {
+            if (_poolCandidates.Count == 0) return;
+
+            var height = _chain.Latest.Index + 1;
+            var shift = _ruleSchedule.RulesForHeight(height).InitialDifficultyShift;
+            var soloWinProbability = (decimal)ProofOfWork.WinProbability(HashPower, shift);
+
+            if (soloWinProbability >= _poolAdoptionThreshold)
+            {
+                if (_currentPool != null)
+                {
+                    Console.WriteLine($"[{Id}] leaving pool {_currentPool}: solo win probability {soloWinProbability:P1} now clears the {_poolAdoptionThreshold:P1} adoption threshold");
+                    _requestPoolSwitch(null);
+                    _currentPool = null;
+                }
+                return;
+            }
+
+            var bestPool = _currentPool;
+            var bestWinProbability = _currentPool == null
+                ? soloWinProbability
+                : (decimal)ProofOfWork.WinProbability(_getPoolHashPower(_currentPool), shift);
+
+            foreach (var candidate in _poolCandidates)
+            {
+                if (candidate == _currentPool) continue;
+                var candidateWinProbability = (decimal)ProofOfWork.WinProbability(_getPoolHashPower(candidate) + HashPower, shift);
+                if (candidateWinProbability > bestWinProbability)
+                {
+                    bestWinProbability = candidateWinProbability;
+                    bestPool = candidate;
+                }
+            }
+
+            if (bestPool != _currentPool)
+            {
+                Console.WriteLine($"[{Id}] joining pool {bestPool} (win probability {bestWinProbability:P1}) — own solo odds ({soloWinProbability:P1}) are below the {_poolAdoptionThreshold:P1} adoption threshold");
+                _requestPoolSwitch(bestPool);
+                _currentPool = bestPool;
             }
         }
 
@@ -643,6 +726,10 @@ namespace BitcoinNetworkSimulator
 
         public int MemberCount { get { lock (_lock) { return _members.Count; } } }
 
+        // This pool's current combined HashPower — see NodeNetwork.GetPoolHashPower,
+        // which a candidate-evaluating SoloMiner elsewhere uses to weigh joining.
+        public int TotalHashPower { get { lock (_lock) { return _members.Sum(m => m.HashPower); } } }
+
         // Used by NodeNetwork.RemoveNode (churn) to drop a departing member.
         // Returns whether the id was actually a member — MemberCount == 0
         // afterward tells the caller this pool has no one left and should be
@@ -653,10 +740,35 @@ namespace BitcoinNetworkSimulator
             lock (_lock) { return _members.RemoveAll(m => m.Id == nodeId) > 0; }
         }
 
+        // Used by NodeNetwork.SwitchPoolMembership, which — unlike
+        // RemoveMemberIfPresent — needs the actual SoloMiner object back so it
+        // can re-add it wherever the node decided to move to.
+        public bool TryRemoveMember(string nodeId, out SoloMiner? member)
+        {
+            lock (_lock)
+            {
+                member = _members.FirstOrDefault(m => m.Id == nodeId);
+                if (member != null) _members.Remove(member);
+                return member != null;
+            }
+        }
+
         public async Task MineOneRoundAsync(CancellationToken token)
         {
+            // Give every member a chance to reconsider — not just whoever ends
+            // up coordinating below, since a low-HashPower member could go a
+            // long time without ever being picked. Reconsideration happens
+            // against a separate snapshot, then a fresh one is taken for the
+            // actual round so a member that just left doesn't still count
+            // toward this round's total HashPower or coordinator draw.
+            List<SoloMiner> forReconsideration;
+            lock (_lock) { forReconsideration = new List<SoloMiner>(_members); }
+            foreach (var member in forReconsideration)
+                member.ReconsiderPoolMembership();
+
             List<SoloMiner> members;
             lock (_lock) { members = new List<SoloMiner>(_members); }
+            if (members.Count == 0) return; // every member reconsidered its way out this round
 
             var totalHashPower = members.Sum(m => m.HashPower);
             var coordinator = WeightedRandomMember(members, totalHashPower, _rng);

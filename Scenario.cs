@@ -287,6 +287,22 @@ namespace BitcoinNetworkSimulator
         public int MaxHashPower { get; set; } = 0;
         public bool CanMine { get; set; } = true;
         public string? Pool { get; set; } = null;
+        // Names of pools this group reconsiders joining every turn — see
+        // "Pool adoption" in README.md. A name that doesn't match any
+        // existing pool (including one nobody has joined yet) is valid;
+        // it's simply empty (0 hash power) until someone joins. Empty
+        // (default) disables reconsideration entirely — a node just stays
+        // wherever Pool put it.
+        public List<string> PoolCandidates { get; set; } = new();
+        // Own solo win-probability cutoff below which this group optimizes
+        // for REALIZATION (join whichever option — including its current
+        // pool — maximizes the group's win probability) instead of expected
+        // value. At or above this threshold it stays solo (or leaves any
+        // pool), since EV always favors solo and the realization benefit of
+        // pooling no longer outweighs the diluted share. Only meaningful
+        // when PoolCandidates is non-empty. Default 0.5 (a coin-flip's worth
+        // of solo odds or better is "good enough").
+        public decimal PoolAdoptionThreshold { get; set; } = 0.5m;
         // See NodeMetadata.EconomicWeight and the "Peer topology" note in
         // README.md. 1 is an ordinary node; higher values make this group's
         // nodes proportionally more likely to be picked as another node's

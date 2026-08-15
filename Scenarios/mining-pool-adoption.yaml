@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=./scenario.schema.json
+NodeRules:
+  - Name: chain
+    RetargetIntervalBlocks: 2016
+    TargetSecondsPerBlock: 600
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 10
+    HalvingIntervalBlocks: 210000
+    MaxSupply: 21000000
+
+Phases:
+  - Description: >-
+      A whale (HashPower 500, ~85.9% solo win probability) and five hobbyists
+      (HashPower 5 each, ~1.9% solo win probability) all consider joining
+      "bigpool" every turn, but only stay put or move based on whether their
+      OWN solo odds clear PoolAdoptionThreshold (0.5) — not expected value,
+      which pooling never improves. The whale's odds already clear it, so it
+      mines solo the whole run. Each hobbyist's don't, so it joins bigpool
+      (seeded with one static HashPower-10 member so it isn't empty) as soon
+      as it gets a turn — watch "joining pool bigpool" lines early on, then
+      "[bigpool] *** mined block" lines showing 6 members splitting every
+      reward proportionally, next to the whale's solo "*** mined block" lines.
+    DurationSeconds: 90
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 1
+        Role: Honest
+        HashPower: 500
+        RulesName: chain
+        PoolCandidates: [bigpool]
+        PoolAdoptionThreshold: 0.5
+      - Count: 1
+        Role: Honest
+        HashPower: 10
+        RulesName: chain
+        Pool: bigpool
+      - Count: 5
+        Role: Honest
+        HashPower: 5
+        RulesName: chain
+        PoolCandidates: [bigpool]
+        PoolAdoptionThreshold: 0.5

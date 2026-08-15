@@ -444,6 +444,14 @@ namespace BitcoinNetworkSimulator
         // role's Pool value, if set, is ignored and it always mines solo. See
         // the "Mining pools" note in README.md.
         public string? Pool { get; set; } = null;
+        // Names of pools this node reconsiders joining every turn — see
+        // ScenarioNodeGroup.PoolCandidates and SoloMiner.ReconsiderPoolMembership.
+        // Empty (default) disables reconsideration entirely.
+        public List<string> PoolCandidates { get; set; } = new();
+        // Own solo win-probability cutoff below which this node optimizes
+        // for realization instead of expected value — see
+        // ScenarioNodeGroup.PoolAdoptionThreshold.
+        public decimal PoolAdoptionThreshold { get; set; } = 0.5m;
         // How heavily this node is weighted when other nodes are choosing
         // their outbound peers (see NodeNetwork.ChooseWeightedPeers) — 1 is
         // an ordinary node. A node with EconomicWeight 20 is 20x as likely
@@ -622,6 +630,8 @@ namespace BitcoinNetworkSimulator
             metadata.HashPower = group.HashPower;
             metadata.CanMine = group.CanMine;
             metadata.Pool = group.Pool;
+            metadata.PoolCandidates = group.PoolCandidates;
+            metadata.PoolAdoptionThreshold = group.PoolAdoptionThreshold;
             metadata.EconomicWeight = group.EconomicWeight;
             metadata.RuleSchedule = group.ResolvedRuleSchedule;
             metadata.ValueSeekingCandidates = group.ResolvedValueSeekingCandidates;

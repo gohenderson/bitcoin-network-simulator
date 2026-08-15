@@ -314,7 +314,13 @@ namespace BitcoinNetworkSimulator
             // already-in-flight iteration, which will simply stop seeing this miner
             // on its next fresh SnapshotMiners() call.
             Action requestForcedChurn = () => RemoveNode(id, watcher);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
+            // Both only need `id`, so — unlike a closure that captured
+            // soloMiner itself — they can be built before soloMiner exists,
+            // same as requestForcedChurn above. See ReconsiderPoolMembership
+            // and SwitchPoolMembership/GetPoolHashPower below.
+            Action<string?> requestPoolSwitch = newPool => SwitchPoolMembership(id, newPool);
+            Func<string, int> getPoolHashPower = poolName => GetPoolHashPower(poolName);
+            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, metadata.PoolCandidates, metadata.PoolAdoptionThreshold, metadata.Pool, getPoolHashPower, requestPoolSwitch, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, _port, getPeerIds, discouragePeer);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
@@ -505,6 +511,71 @@ namespace BitcoinNetworkSimulator
 
                 foreach (var id in toRemove)
                     RemoveNode(id, watcher);
+            }
+        }
+
+        // A named pool's current combined HashPower (0 if it doesn't exist
+        // yet, e.g. a candidate nobody has joined) — used by
+        // SoloMiner.ReconsiderPoolMembership to weigh joining without
+        // actually joining. See "Pool adoption" in README.md.
+        public int GetPoolHashPower(string poolName)
+        {
+            lock (_lock)
+            {
+                return _poolMinersByName.TryGetValue(poolName, out var pool) ? pool.TotalHashPower : 0;
+            }
+        }
+
+        // Moves nodeId between _allMiners (solo) and a PoolMiner's member
+        // list — the same structural move AddNodeAsync makes once at
+        // creation time (see the "Deciding solo vs. pooled" comment there),
+        // made safe to repeat at runtime. Looks the SoloMiner object up
+        // wherever it currently lives rather than trusting a caller-supplied
+        // reference, so it's correct even if the node churned out between
+        // deciding to switch and this call running. Called from
+        // SoloMiner.ReconsiderPoolMembership via the requestPoolSwitch
+        // closure built in AddNodeAsync.
+        public void SwitchPoolMembership(string nodeId, string? newPool)
+        {
+            lock (_lock)
+            {
+                SoloMiner? soloMiner = _allMiners.OfType<SoloMiner>().FirstOrDefault(m => m.Id == nodeId);
+                if (soloMiner != null)
+                {
+                    _allMiners.Remove(soloMiner);
+                }
+                else
+                {
+                    foreach (var (poolName, pool) in _poolMinersByName.ToList())
+                    {
+                        if (pool.TryRemoveMember(nodeId, out var removed))
+                        {
+                            soloMiner = removed;
+                            if (pool.MemberCount == 0)
+                            {
+                                _poolMinersByName.Remove(poolName);
+                                _allMiners.Remove(pool);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (soloMiner == null) return; // already gone (e.g. churned this same tick)
+
+                if (string.IsNullOrEmpty(newPool))
+                {
+                    _allMiners.Add(soloMiner);
+                }
+                else if (_poolMinersByName.TryGetValue(newPool, out var target))
+                {
+                    target.AddMember(soloMiner);
+                }
+                else
+                {
+                    var created = new PoolMiner(newPool, new[] { soloMiner }, _rng);
+                    _poolMinersByName[newPool] = created;
+                    _allMiners.Add(created);
+                }
             }
         }
 

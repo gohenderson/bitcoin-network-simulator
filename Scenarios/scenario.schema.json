@@ -165,6 +165,18 @@
           "type": ["string", "null"],
           "description": "Null/omitted mines solo (default). Otherwise, the name of a mining pool this group subscribes to — its HashPower is combined with every other current member's into the pool's single shared turn instead of getting its own. Only honored for Role Honest; a malicious role's Pool value, if set, is ignored and it always mines solo."
         },
+        "PoolCandidates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of pools this group reconsiders joining every turn — see \"Pool adoption\" in README.md. A name that doesn't match any existing pool (including one nobody has joined yet) is valid; it's simply empty (0 hash power) until someone joins. Empty (default) disables reconsideration entirely — a node just stays wherever Pool put it."
+        },
+        "PoolAdoptionThreshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.5,
+          "description": "Own solo win-probability cutoff below which this group optimizes for REALIZATION (join whichever option — including its current pool — maximizes the group's win probability) instead of expected value, which pooling can never improve. At or above this threshold it stays solo (or leaves any pool). Only meaningful when PoolCandidates is non-empty."
+        },
         "EconomicWeight": {
           "type": "integer",
           "minimum": 1,
