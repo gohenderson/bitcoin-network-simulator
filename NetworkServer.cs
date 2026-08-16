@@ -23,14 +23,22 @@ namespace BitcoinNetworkSimulator
     {
         private readonly int _port;
         private readonly Func<string, Node?> _resolveNode;
+        private readonly Func<HttpListenerContext, string, Task>? _dashboardHandler;
         private readonly HttpListener _listener;
         private readonly ElasticTaskPool _requestPool;
         private volatile bool _running = true;
 
-        public NetworkServer(int port, Func<string, Node?> resolveNode)
+        // dashboardHandler, when given, intercepts every request whose first
+        // path segment is "dashboard" — reserved out of node-id space since a
+        // real node id is always NodeNetwork.NodeNameFor's zero-padded-index
+        // + Greek-letter shape (e.g. "000-alpha"), never this literal word —
+        // instead of routing it through resolveNode like an ordinary node
+        // request. See Dashboard.cs and the "Watching a run" note in README.md.
+        public NetworkServer(int port, Func<string, Node?> resolveNode, Func<HttpListenerContext, string, Task>? dashboardHandler = null)
         {
             _port = port;
             _resolveNode = resolveNode;
+            _dashboardHandler = dashboardHandler;
             _listener = new HttpListener();
             _listener.Prefixes.Add($"http://localhost:{port}/");
             _requestPool = new ElasticTaskPool("network-server", minWorkers: 4, maxWorkers: 64, scaleUpQueueThreshold: 8);
@@ -83,6 +91,13 @@ namespace BitcoinNetworkSimulator
                 if (segments.Length == 0)
                 {
                     await WriteJsonAsync(ctx, 404, "{\"error\":\"no node id in path — expected /<node-id>/<route>\"}");
+                    return;
+                }
+
+                if (segments[0] == "dashboard" && _dashboardHandler != null)
+                {
+                    var dashboardRoute = segments.Length > 1 ? "/" + segments[1] : "/";
+                    await _dashboardHandler(ctx, dashboardRoute);
                     return;
                 }
 

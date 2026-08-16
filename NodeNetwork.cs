@@ -103,7 +103,6 @@ namespace BitcoinNetworkSimulator
         }
 
         private readonly string _runRootDir;
-        private readonly int _port;
         // Node-creation defaults for whichever phase is currently active —
         // see SetNodeCreationSettings. Not readonly: a multi-phase scenario
         // (see "Scenarios" in README.md) can change these between phases,
@@ -154,10 +153,17 @@ namespace BitcoinNetworkSimulator
         private readonly Dictionary<string, HashSet<string>> _peerIdsByNodeId = new();
         private readonly Dictionary<string, int> _economicWeightByNodeId = new();
 
-        public NodeNetwork(string runRootDir, int port, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction, List<ResolvedDefaultRuleScheduleEntry> defaultRuleSchedule, decimal debasementRatePerBlock)
+        // NodeRole/CanMine per node, for GetSnapshot's dashboard reporting —
+        // recorded once at creation since neither ever changes for a node's
+        // lifetime. Not derivable from _allMiners alone: a wallet-only node
+        // (CanMine false) has no IMiner at all, so it would otherwise be
+        // invisible to a reporting pass that only walks the miner roster.
+        private readonly Dictionary<string, NodeRole> _roleByNodeId = new();
+        private readonly Dictionary<string, bool> _canMineByNodeId = new();
+
+        public NodeNetwork(string runRootDir, int outboundPeerCount, double maliciousFraction, double walletOnlyFraction, List<ResolvedDefaultRuleScheduleEntry> defaultRuleSchedule, decimal debasementRatePerBlock)
         {
             _runRootDir = runRootDir;
-            _port = port;
             _outboundPeerCount = outboundPeerCount;
             _maliciousFraction = maliciousFraction;
             _walletOnlyFraction = walletOnlyFraction;
@@ -188,12 +194,78 @@ namespace BitcoinNetworkSimulator
         // for an unknown id (404).
         public Node? ResolveNode(string id) { lock (_lock) { return _nodesById.TryGetValue(id, out var node) ? node : null; } }
 
+        // The shape for reaching any node in this network without a real
+        // HTTP round trip: same (method, route, senderId, body) shape a
+        // real HTTP request to that node would carry, and the same
+        // (statusCode, body) shape its response would carry — see
+        // Node.HandleAsync, the method this ultimately calls. Every node's
+        // own SoloMiner/Node instance is handed DispatchInternalAsync
+        // itself (a plain method-group reference, no closure needed) at
+        // construction time, the same way they're already handed
+        // getPeerIds/discouragePeer below.
+        public delegate Task<(int StatusCode, string Body)> InternalDispatchFunc(string targetNodeId, string method, string route, string? senderId, string? body);
+
+        public async Task<(int StatusCode, string Body)> DispatchInternalAsync(string targetNodeId, string method, string route, string? senderId, string? body)
+        {
+            var node = ResolveNode(targetNodeId);
+            if (node == null)
+                return (404, $"{{\"error\":\"unknown node id '{targetNodeId}'\"}}");
+            return await node.HandleAsync(method, route, senderId, body);
+        }
+
         // The tip hash MiningScheduler watches to detect a new block (and
         // reshuffle mining turn order) — null once the network has no nodes
         // yet, which only happens before the very first AddNodeAsync call.
         public string? CurrentTipHash() { lock (_lock) { return _allNodes.Count > 0 ? _allNodes[0].Chain.Latest.Hash : null; } }
 
         public List<IMiner> SnapshotMiners() { lock (_lock) { return new List<IMiner>(_allMiners); } }
+
+        // Point-in-time view of every live node's participation/influence
+        // stats — the live source of truth for HashPower (mutable at runtime
+        // via reinvestment, see SoloMiner) and pool membership, combined with
+        // the creation-time-fixed Role/CanMine/EconomicWeight recorded above.
+        // Backs the /dashboard endpoint (see Dashboard.cs) — nothing else in
+        // the simulation needs this, so it's assembled fresh on demand rather
+        // than kept incrementally up to date.
+        public NetworkSnapshot GetSnapshot()
+        {
+            lock (_lock)
+            {
+                var hashPowerByMinerId = new Dictionary<string, int>();
+                var poolByMemberId = new Dictionary<string, string>();
+                var pools = new List<PoolSummary>();
+
+                foreach (var miner in _allMiners)
+                {
+                    if (miner is PoolMiner pool)
+                    {
+                        pools.Add(new PoolSummary { Name = pool.Label, MemberCount = pool.MemberCount, TotalHashPower = pool.TotalHashPower });
+                        foreach (var member in pool.Members)
+                        {
+                            hashPowerByMinerId[member.Id] = member.HashPower;
+                            poolByMemberId[member.Id] = pool.Label;
+                        }
+                    }
+                    else if (miner is SoloMiner solo)
+                    {
+                        hashPowerByMinerId[solo.Id] = solo.HashPower;
+                    }
+                }
+
+                var nodes = _allNodeIds.Select(id => new NodeSummary
+                {
+                    Id = id,
+                    Role = _roleByNodeId.GetValueOrDefault(id, NodeRole.Honest),
+                    CanMine = _canMineByNodeId.GetValueOrDefault(id, false),
+                    HashPower = hashPowerByMinerId.GetValueOrDefault(id, 0),
+                    Pool = poolByMemberId.GetValueOrDefault(id),
+                    EconomicWeight = _economicWeightByNodeId.GetValueOrDefault(id, 1),
+                    PeerCount = _peerIdsByNodeId.TryGetValue(id, out var peers) ? peers.Count : 0
+                }).ToList();
+
+                return new NetworkSnapshot { Nodes = nodes, Pools = pools };
+            }
+        }
 
         // This node's current outbound-and-inbound peer set — see the "Peer
         // topology" note in README.md. Handed to both SoloMiner (as its
@@ -274,6 +346,8 @@ namespace BitcoinNetworkSimulator
             {
                 _allNodeIds.Add(id);
                 _economicWeightByNodeId[id] = metadata.EconomicWeight;
+                _roleByNodeId[id] = metadata.NodeRole;
+                _canMineByNodeId[id] = metadata.CanMine;
                 if (!_peerIdsByNodeId.TryGetValue(id, out var mySet))
                     _peerIdsByNodeId[id] = mySet = new HashSet<string>();
 
@@ -326,8 +400,8 @@ namespace BitcoinNetworkSimulator
             // and SwitchPoolMembership/GetPoolHashPower below.
             Action<string?> requestPoolSwitch = newPool => SwitchPoolMembership(id, newPool);
             Func<string, int> getPoolHashPower = poolName => GetPoolHashPower(poolName);
-            var soloMiner = new SoloMiner(id, _port, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, metadata.PoolCandidates, metadata.PoolAdoptionThreshold, metadata.Pool, getPoolHashPower, requestPoolSwitch, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
-            var node = new Node(id, chain, mempool, watcher, _port, getPeerIds, discouragePeer);
+            var soloMiner = new SoloMiner(id, DispatchInternalAsync, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, metadata.PoolCandidates, metadata.PoolAdoptionThreshold, metadata.Pool, getPoolHashPower, requestPoolSwitch, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
+            var node = new Node(id, chain, mempool, watcher, DispatchInternalAsync, getPeerIds, discouragePeer);
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
 
@@ -603,6 +677,8 @@ namespace BitcoinNetworkSimulator
                 _allNodes.RemoveAll(n => n.Id == nodeId);
                 _allNodeIds.Remove(nodeId);
                 _economicWeightByNodeId.Remove(nodeId);
+                _roleByNodeId.Remove(nodeId);
+                _canMineByNodeId.Remove(nodeId);
 
                 // Bidirectional — see the "Peer topology" note in README.md:
                 // drop this node's own edge set, and this node's id out of
@@ -644,5 +720,41 @@ namespace BitcoinNetworkSimulator
                     mySet.Remove(peerId);
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // NodeNetwork.GetSnapshot's return shape — see that method's comment.
+    // Plain data, no behavior; Dashboard.cs is the only consumer.
+    // ------------------------------------------------------------------
+    public sealed class NodeSummary
+    {
+        public string Id { get; init; } = "";
+        public NodeRole Role { get; init; }
+        public bool CanMine { get; init; }
+        // 0 for a wallet-only node, or a mining-enabled node this snapshot
+        // otherwise couldn't find a live IMiner for (shouldn't happen, but
+        // never worth a null here over a plain zero).
+        public int HashPower { get; init; }
+        // Null when this node mines solo (or doesn't mine at all).
+        public string? Pool { get; init; }
+        public int EconomicWeight { get; init; }
+        // Total peers, inbound + outbound (the peer graph's edges are
+        // bidirectional) — see the "Peer topology" note in README.md. A
+        // node's structural influence: how much of the network's block/chain
+        // relay actually flows through it.
+        public int PeerCount { get; init; }
+    }
+
+    public sealed class PoolSummary
+    {
+        public string Name { get; init; } = "";
+        public int MemberCount { get; init; }
+        public int TotalHashPower { get; init; }
+    }
+
+    public sealed class NetworkSnapshot
+    {
+        public List<NodeSummary> Nodes { get; init; } = new();
+        public List<PoolSummary> Pools { get; init; } = new();
     }
 }

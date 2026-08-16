@@ -719,6 +719,21 @@ It can be queried directly (e.g. with the `sqlite3` CLI or any SQLite
 library) while a run is still in progress, and is the basis for
 reconstructing reports or charting a run's progression over time.
 
+**Web dashboard.** `http://localhost:5000/dashboard/` (`Dashboard.cs`) is a
+self-contained, dependency-free HTML page — served directly by the same
+`NetworkServer` every node shares, off a reserved `dashboard` path segment
+that a real node id (always `NodeNetwork.NodeNameFor`'s zero-padded-index +
+Greek-letter shape, e.g. `000-alpha`) can never collide with — that polls
+`http://localhost:5000/dashboard/summary` (JSON) every 2 seconds and renders:
+participant/mining/wallet-only/pool counts, chain height and convergence
+state, top miners ranked by hash-power share and by blocks actually won
+(`WatcherStore.GetWinCountsByNode`, tallied from `watcher.db`'s `events`
+table), the most-connected nodes by peer count (`NodeNetwork.GetSnapshot`'s
+`PeerCount` — the same structural-hub dynamic described under [Peer
+topology](#how-it-works)), pool composition, and a full sortable-by-hash-power
+node table. Open it in a browser while a run is in progress; no separate
+process or build step is needed.
+
 ## Project layout
 
 | File | Responsibility |
@@ -729,10 +744,11 @@ reconstructing reports or charting a run's progression over time.
 | `TransactionGenerator.cs` | Synthetic transaction traffic: picks a real sender/recipient pair from live balances each round and submits a transaction. |
 | `PersistenceLoop.cs` | Per-node persistence: resumes a node's chain from its `blockchain.db` at startup, then periodically syncs it back for the rest of the run. |
 | `Blockchain.cs` | The blockchain data model: `Transaction`, `Block`, `ConsensusRules` (one proof-of-work/economics ruleset), `RuleSchedule` (a node's own timeline of which `ConsensusRules` is active at which height — what `ValidateChain` actually checks incoming blocks against), `ProofOfWork`, `Economics`, `Ledger`, and `Blockchain` itself (validation and fork-choice logic). Also defines `BlockchainStore` — SQLite persistence for one node's local chain (`blockchain.db`). |
-| `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler. |
+| `NetworkServer.cs` | The single shared HTTP listener; routes each request by node id to that node's handler, or to `Dashboard.cs` under the reserved `dashboard` path segment. |
 | `Node.cs` | Per-node request handling: `/<node-id>/chain`, `/<node-id>/tx`, `/<node-id>/receiveBlock`, `/<node-id>/receiveChain`, etc., including relaying an accepted block/chain on to this node's own other peers. Also defines `NodeRole`, `NodeIdentityRegistry` (process-wide table binding node Ids to the public keys they sign blocks with), and `NodeMetadata`/`NodeMetadataStore` (a node's persisted config — role, hash power, economic weight, consensus rules, signing key — and its `metadata.json` load/save/apply logic). |
 | `Miner.cs` | `SoloMiner` — nonce search, block assembly, broadcast, and a node's signing identity. Also defines `PoolMiner` (a named group of `SoloMiner`s mining as one combined turn, with proportional reward splitting) and `IMiner` (the common interface the round-robin scheduler rotates over). |
 | `Watcher.cs` | `ChainWatcher` — periodic cross-network convergence/validity auditing. Also defines `WatcherStore` — SQLite persistence for the watcher's events and audits (`watcher.db`). |
+| `Dashboard.cs` | The web dashboard — see [Watching a run](#watching-a-run): builds the JSON summary from `NodeNetwork.GetSnapshot` and `WatcherStore.GetWinCountsByNode`, and serves the page that polls and renders it. |
 | `Scenario.cs` | Scenario file format and loader; also computes each run's `ScenarioResults/` result directory. |
 | `ElasticTaskPool.cs` | `ElasticTaskPool` — a bounded, load-scaling async worker pool; backs `NetworkServer`'s request handling. |
 

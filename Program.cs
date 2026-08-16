@@ -104,16 +104,17 @@ namespace BitcoinNetworkSimulator
             var cts = new CancellationTokenSource();
             var combinedDescription = string.Join(" -> ", phases.Select(p => p.Description).Where(d => !string.IsNullOrWhiteSpace(d)));
             using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, loadedScenarioFile != null ? scenarioPath : null, combinedDescription.Length > 0 ? combinedDescription : null);
-            var watcher = new ChainWatcher(Port, new List<string>(), watcherStore);
 
             var settings = new GrowthSettings().ApplyPhase(phases[0]);
-            var network = new NodeNetwork(RunRootDir, Port, settings.OutboundPeerCount, settings.MaliciousFraction, settings.WalletOnlyFraction, loadedScenarioFile?.ResolvedDefaultRuleSchedule ?? new List<ResolvedDefaultRuleScheduleEntry>(), loadedScenarioFile?.DebasementRatePerBlock ?? 0m);
+            var network = new NodeNetwork(RunRootDir, settings.OutboundPeerCount, settings.MaliciousFraction, settings.WalletOnlyFraction, loadedScenarioFile?.ResolvedDefaultRuleSchedule ?? new List<ResolvedDefaultRuleScheduleEntry>(), loadedScenarioFile?.DebasementRatePerBlock ?? 0m);
+            var watcher = new ChainWatcher(network.DispatchInternalAsync, new List<string>(), watcherStore);
 
             // One shared listener for the whole network — see
             // NetworkServer.cs — dispatching every request by the node id in
             // its URL path (network.ResolveNode looks it up) rather than
             // each node owning its own OS-level port.
-            var server = new NetworkServer(Port, network.ResolveNode);
+            var server = new NetworkServer(Port, network.ResolveNode,
+                (ctx, route) => Dashboard.HandleAsync(ctx, route, network, watcherStore, watcher));
             server.Start();
 
             await NodeMetadataStore.PreloadKnownSigningKeysAsync(RunRootDir);
@@ -130,7 +131,8 @@ namespace BitcoinNetworkSimulator
             Console.WriteLine($"All nodes share http://localhost:{Port}/ — address one by id in the path.");
             Console.WriteLine($"Try: curl http://localhost:{Port}/{NodeNetwork.NodeNameFor(0)}/chain");
             Console.WriteLine($"Or:  curl http://localhost:{Port}/{NodeNetwork.NodeNameFor(0)}/balances");
-            Console.WriteLine("Watcher: inspect watcher.db (SQLite) for convergence/recovery history.\n");
+            Console.WriteLine("Watcher: inspect watcher.db (SQLite) for convergence/recovery history.");
+            Console.WriteLine($"Dashboard: http://localhost:{Port}/dashboard/ — participants, top miners, pools, peer-graph influence.\n");
 
             // One Enter-press stops the whole run, from any phase — reused
             // (not re-created) across every phase's wait below, so a

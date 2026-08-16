@@ -2,7 +2,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -53,8 +52,9 @@ namespace BitcoinNetworkSimulator
         // is picked up automatically with no other code changes.
         public int HashPower { get; private set; }
         public string Label => Id;
+        public NodeRole Role => _role;
 
-        private readonly int _serverPort;
+        private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private readonly NodeRole _role;
         // This node's own timeline of which ConsensusRules is active at
         // which height — see RuleSchedule's own comment in Blockchain.cs.
@@ -69,7 +69,6 @@ namespace BitcoinNetworkSimulator
         private readonly Func<List<string>> _getPeerIds;
         private readonly ChainWatcher _watcher;
         private readonly ECDsa _signingKey;
-        private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly Random _rng = new(Guid.NewGuid().GetHashCode());
         // $ cost of a single mining attempt — see ScenarioNodeGroup.CostPerAttempt
         // and RuleSchedule.BestValueAt. 0 (default) means mining is free, so the
@@ -122,14 +121,14 @@ namespace BitcoinNetworkSimulator
         // NodeNetwork.SwitchPoolMembership.
         private readonly Action<string?> _requestPoolSwitch;
 
-        // `serverPort` is the single port the whole network's NetworkServer
-        // listens on (see NetworkServer.cs) — every peer URL this miner
-        // builds is http://localhost:{serverPort}/{peerId}/....
-        public SoloMiner(string id, int serverPort, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, List<string> poolCandidates, decimal poolAdoptionThreshold, string? initialPool, Func<string, int> getPoolHashPower, Action<string?> requestPoolSwitch, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
+        // `dispatch` reaches any peer node directly, in-process — see
+        // NodeNetwork.DispatchInternalAsync — instead of this miner
+        // building real HTTP requests against NetworkServer itself.
+        public SoloMiner(string id, NodeNetwork.InternalDispatchFunc dispatch, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, List<string> poolCandidates, decimal poolAdoptionThreshold, string? initialPool, Func<string, int> getPoolHashPower, Action<string?> requestPoolSwitch, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
             Id = id;
-            _serverPort = serverPort;
+            _dispatch = dispatch;
             _role = role;
             HashPower = Math.Max(1, hashPower);
             _costPerAttempt = costPerAttempt;
@@ -650,17 +649,9 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveBlock")
-                    {
-                        Content = new StringContent(json, Encoding.UTF8, "application/json")
-                    };
-                    request.Headers.Add(Node.SenderIdHeaderName, Id);
-                    var response = await _http.SendAsync(request);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        var body = await response.Content.ReadAsStringAsync();
+                    var (statusCode, body) = await _dispatch(peerId, "POST", "/receiveBlock", Id, json);
+                    if (statusCode < 200 || statusCode >= 300)
                         Console.WriteLine($"[{Id}] peer {peerId} rejected block #{block.Index}: {body}");
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -677,17 +668,9 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveChain")
-                    {
-                        Content = new StringContent(json, Encoding.UTF8, "application/json")
-                    };
-                    request.Headers.Add(Node.SenderIdHeaderName, Id);
-                    var response = await _http.SendAsync(request);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        var body = await response.Content.ReadAsStringAsync();
+                    var (statusCode, body) = await _dispatch(peerId, "POST", "/receiveChain", Id, json);
+                    if (statusCode < 200 || statusCode >= 300)
                         Console.WriteLine($"[{Id}] peer {peerId} rejected chain: {body}");
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -735,6 +718,11 @@ namespace BitcoinNetworkSimulator
         }
 
         public int MemberCount { get { lock (_lock) { return _members.Count; } } }
+
+        // Snapshot copy of current members — used by NodeNetwork.GetSnapshot
+        // (dashboard reporting) to attribute each member's own HashPower and
+        // pool affiliation without exposing the live, lock-guarded list itself.
+        public IReadOnlyList<SoloMiner> Members { get { lock (_lock) { return _members.ToList(); } } }
 
         // This pool's current combined HashPower — see NodeNetwork.GetPoolHashPower,
         // which a candidate-evaluating SoloMiner elsewhere uses to weigh joining.

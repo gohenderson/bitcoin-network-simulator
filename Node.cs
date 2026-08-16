@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -68,170 +67,47 @@ namespace BitcoinNetworkSimulator
         public ConcurrentQueue<Transaction> Mempool { get; }
 
         private readonly ChainWatcher _watcher;
-        private readonly int _serverPort;
+        private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private readonly Func<List<string>> _getPeerIds;
         private readonly Action<string> _discouragePeer;
-        private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
 
-        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, int serverPort, Func<List<string>> getPeerIds, Action<string> discouragePeer)
+        public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, NodeNetwork.InternalDispatchFunc dispatch, Func<List<string>> getPeerIds, Action<string> discouragePeer)
         {
             Id = id;
             Chain = chain;
             Mempool = mempool;
             _watcher = watcher;
-            _serverPort = serverPort;
+            _dispatch = dispatch;
             _getPeerIds = getPeerIds;
             _discouragePeer = discouragePeer;
         }
 
         // `route` is the request path with this node's id segment already
         // stripped off by NetworkServer — e.g. "/chain" for a request to
-        // /000-alpha/chain.
+        // /000-alpha/chain. Thin adapter over HandleAsync: pulls method,
+        // sender id, and body out of the real HTTP request, then writes
+        // HandleAsync's (status, body) result back to the real HTTP
+        // response — the only place this class still touches
+        // HttpListenerContext, so HandleAsync itself stays reachable from a
+        // real request or an in-process call (see NodeNetwork.DispatchInternalAsync)
+        // identically.
         public async Task HandleRequestAsync(HttpListenerContext ctx, string route)
         {
             try
             {
                 var req = ctx.Request;
                 var res = ctx.Response;
-                string responseBody;
                 res.ContentType = "application/json";
 
-                switch (route)
+                string? body = null;
+                if (req.HttpMethod == "POST")
                 {
-                    case "/chain":
-                        responseBody = JsonSerializer.Serialize(Chain.Snapshot(),
-                            new JsonSerializerOptions { WriteIndented = true });
-                        break;
-
-                    case "/mempool":
-                        responseBody = JsonSerializer.Serialize(Mempool.ToArray());
-                        break;
-
-                    case "/balances":
-                        responseBody = JsonSerializer.Serialize(Ledger.ComputeBalances(Chain.Snapshot()));
-                        break;
-
-                    case "/tx" when req.HttpMethod == "POST":
-                        {
-                            using var reader = new StreamReader(req.InputStream);
-                            var body = await reader.ReadToEndAsync();
-                            var tx = JsonSerializer.Deserialize<Transaction>(body,
-                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                            if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0)
-                            {
-                                res.StatusCode = 400;
-                                responseBody = "{\"status\":\"bad transaction\"}";
-                            }
-                            else if (tx.From != Economics.CoinbaseSender &&
-                                Ledger.GetBalance(Chain.Snapshot(), tx.From) is var available && tx.Amount > available)
-                            {
-                                // Best-effort only: this checks against our own current tip, not
-                                // whatever else is already sitting in the mempool. The real
-                                // authority is the running-balance simulation each miner does
-                                // when assembling a block (FilterAffordable) and the check
-                                // ValidateChain performs on every block any peer receives — this
-                                // just rejects an obviously-bad transaction early instead of
-                                // letting it sit in the mempool forever.
-                                res.StatusCode = 400;
-                                responseBody = JsonSerializer.Serialize(new
-                                {
-                                    status = "rejected",
-                                    reason = $"insufficient balance: {tx.From} has {available}, tried to send {tx.Amount}"
-                                });
-                            }
-                            else
-                            {
-                                Mempool.Enqueue(tx);
-                                responseBody = "{\"status\":\"accepted\"}";
-                            }
-                            break;
-                        }
-
-                    case "/receiveBlock" when req.HttpMethod == "POST":
-                        {
-                            var senderId = req.Headers[SenderIdHeaderName];
-                            if (!IsStillAPeer(senderId, out responseBody))
-                            {
-                                res.StatusCode = 403;
-                                break;
-                            }
-
-                            using var reader = new StreamReader(req.InputStream);
-                            var body = await reader.ReadToEndAsync();
-                            var block = JsonSerializer.Deserialize<Block>(body,
-                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                            if (block != null)
-                            {
-                                var (ok, reason, attributable) = Chain.TryAppend(block);
-                                if (ok)
-                                {
-                                    Console.WriteLine($"[{Id}] accepted block #{block.Index} built by {block.BuiltBy} (validated: parent + target + hash + coinbase + tx checks passed)");
-                                    _watcher.ObserveAccepted(Id, block);
-                                    responseBody = "{\"status\":\"appended\"}";
-                                    _ = RelayBlockAsync(block);
-                                }
-                                else
-                                {
-                                    Console.WriteLine($"[{Id}] REJECTED block #{block.Index} from {block.BuiltBy}: {reason}");
-                                    _watcher.ObserveRejected(Id, block, reason);
-                                    if (attributable) DiscourageSender(senderId, reason);
-                                    res.StatusCode = 409;
-                                    responseBody = JsonSerializer.Serialize(new { status = "rejected", reason });
-                                }
-                            }
-                            else
-                            {
-                                res.StatusCode = 400;
-                                responseBody = "{\"status\":\"bad block\"}";
-                            }
-                            break;
-                        }
-
-                    case "/receiveChain" when req.HttpMethod == "POST":
-                        {
-                            var senderId = req.Headers[SenderIdHeaderName];
-                            if (!IsStillAPeer(senderId, out responseBody))
-                            {
-                                res.StatusCode = 403;
-                                break;
-                            }
-
-                            using var reader = new StreamReader(req.InputStream);
-                            var body = await reader.ReadToEndAsync();
-                            var candidate = JsonSerializer.Deserialize<List<Block>>(body,
-                                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
-                            if (candidate != null)
-                            {
-                                var (replaced, reason, attributable) = Chain.TryReplaceWithLongerChain(candidate);
-
-                                if (replaced)
-                                {
-                                    Console.WriteLine($"[{Id}] REORGANIZED: {reason}");
-                                    _watcher.ObserveReorganization(Id, reason);
-                                    responseBody = JsonSerializer.Serialize(new { status = "reorganized", reason });
-                                    _ = RelayChainAsync(candidate);
-                                }
-                                else
-                                {
-                                    if (attributable) DiscourageSender(senderId, reason);
-                                    responseBody = JsonSerializer.Serialize(new { status = "ignored", reason });
-                                }
-                            }
-                            else
-                            {
-                                res.StatusCode = 400;
-                                responseBody = "{\"status\":\"bad chain\"}";
-                            }
-
-                            break;
-                        }
-
-                    default:
-                        res.StatusCode = 404;
-                        responseBody = "{\"error\":\"not found\"}";
-                        break;
+                    using var reader = new StreamReader(req.InputStream);
+                    body = await reader.ReadToEndAsync();
                 }
+
+                var (statusCode, responseBody) = await HandleAsync(req.HttpMethod, route, req.Headers[SenderIdHeaderName], body);
+                res.StatusCode = statusCode;
 
                 var buffer = Encoding.UTF8.GetBytes(responseBody);
                 res.ContentLength64 = buffer.Length;
@@ -242,6 +118,161 @@ namespace BitcoinNetworkSimulator
             {
                 Console.WriteLine($"[{Id}] request error: {ex.Message}");
             }
+        }
+
+        // The transport-agnostic core of every route this node serves —
+        // reachable both from a real HTTP request (via HandleRequestAsync
+        // above) and from another node's in-process call (via
+        // NodeNetwork.DispatchInternalAsync), with identical behavior
+        // either way. `senderId` and `body` are plain strings rather than
+        // request headers/objects deliberately: a caller — real or
+        // in-process — only ever hands this method the same JSON payload
+        // and attributed sender id a real HTTP POST would have carried, so
+        // /receiveBlock and /receiveChain always independently deserialize
+        // and validate their input from scratch, never trust a shared
+        // object reference. That's what keeps a Corruptor's post-hash
+        // tampering, an Impersonator's identity spoofing, and peer
+        // discouragement (IsStillAPeer/DiscourageSender below) behaving
+        // identically regardless of which caller reached this node.
+        // Deliberately doesn't catch its own exceptions — HandleRequestAsync's
+        // catch covers the real-HTTP path, and NodeNetwork.DispatchInternalAsync's
+        // caller (RelayBlockAsync/RelayChainAsync, SoloMiner.SendBlock/SendChain)
+        // already has its own per-peer catch for the in-process path.
+        public async Task<(int StatusCode, string Body)> HandleAsync(string method, string route, string? senderId, string? body)
+        {
+            int statusCode = 200;
+            string responseBody;
+
+            switch (route)
+            {
+                case "/chain":
+                    responseBody = JsonSerializer.Serialize(Chain.Snapshot(),
+                        new JsonSerializerOptions { WriteIndented = true });
+                    break;
+
+                case "/mempool":
+                    responseBody = JsonSerializer.Serialize(Mempool.ToArray());
+                    break;
+
+                case "/balances":
+                    responseBody = JsonSerializer.Serialize(Ledger.ComputeBalances(Chain.Snapshot()));
+                    break;
+
+                case "/tx" when method == "POST":
+                    {
+                        var tx = JsonSerializer.Deserialize<Transaction>(body ?? "",
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0)
+                        {
+                            statusCode = 400;
+                            responseBody = "{\"status\":\"bad transaction\"}";
+                        }
+                        else if (tx.From != Economics.CoinbaseSender &&
+                            Ledger.GetBalance(Chain.Snapshot(), tx.From) is var available && tx.Amount > available)
+                        {
+                            // Best-effort only: this checks against our own current tip, not
+                            // whatever else is already sitting in the mempool. The real
+                            // authority is the running-balance simulation each miner does
+                            // when assembling a block (FilterAffordable) and the check
+                            // ValidateChain performs on every block any peer receives — this
+                            // just rejects an obviously-bad transaction early instead of
+                            // letting it sit in the mempool forever.
+                            statusCode = 400;
+                            responseBody = JsonSerializer.Serialize(new
+                            {
+                                status = "rejected",
+                                reason = $"insufficient balance: {tx.From} has {available}, tried to send {tx.Amount}"
+                            });
+                        }
+                        else
+                        {
+                            Mempool.Enqueue(tx);
+                            responseBody = "{\"status\":\"accepted\"}";
+                        }
+                        break;
+                    }
+
+                case "/receiveBlock" when method == "POST":
+                    {
+                        if (!IsStillAPeer(senderId, out responseBody))
+                        {
+                            statusCode = 403;
+                            break;
+                        }
+
+                        var block = JsonSerializer.Deserialize<Block>(body ?? "",
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (block != null)
+                        {
+                            var (ok, reason, attributable) = Chain.TryAppend(block);
+                            if (ok)
+                            {
+                                Console.WriteLine($"[{Id}] accepted block #{block.Index} built by {block.BuiltBy} (validated: parent + target + hash + coinbase + tx checks passed)");
+                                _watcher.ObserveAccepted(Id, block);
+                                responseBody = "{\"status\":\"appended\"}";
+                                _ = RelayBlockAsync(block);
+                            }
+                            else
+                            {
+                                Console.WriteLine($"[{Id}] REJECTED block #{block.Index} from {block.BuiltBy}: {reason}");
+                                _watcher.ObserveRejected(Id, block, reason);
+                                if (attributable) DiscourageSender(senderId, reason);
+                                statusCode = 409;
+                                responseBody = JsonSerializer.Serialize(new { status = "rejected", reason });
+                            }
+                        }
+                        else
+                        {
+                            statusCode = 400;
+                            responseBody = "{\"status\":\"bad block\"}";
+                        }
+                        break;
+                    }
+
+                case "/receiveChain" when method == "POST":
+                    {
+                        if (!IsStillAPeer(senderId, out responseBody))
+                        {
+                            statusCode = 403;
+                            break;
+                        }
+
+                        var candidate = JsonSerializer.Deserialize<List<Block>>(body ?? "",
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                        if (candidate != null)
+                        {
+                            var (replaced, reason, attributable) = Chain.TryReplaceWithLongerChain(candidate);
+
+                            if (replaced)
+                            {
+                                Console.WriteLine($"[{Id}] REORGANIZED: {reason}");
+                                _watcher.ObserveReorganization(Id, reason);
+                                responseBody = JsonSerializer.Serialize(new { status = "reorganized", reason });
+                                _ = RelayChainAsync(candidate);
+                            }
+                            else
+                            {
+                                if (attributable) DiscourageSender(senderId, reason);
+                                responseBody = JsonSerializer.Serialize(new { status = "ignored", reason });
+                            }
+                        }
+                        else
+                        {
+                            statusCode = 400;
+                            responseBody = "{\"status\":\"bad chain\"}";
+                        }
+
+                        break;
+                    }
+
+                default:
+                    statusCode = 404;
+                    responseBody = "{\"error\":\"not found\"}";
+                    break;
+            }
+
+            return (statusCode, responseBody);
         }
 
         // Refuses a request from a peer this node has already discouraged (see
@@ -291,12 +322,7 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveBlock")
-                    {
-                        Content = new StringContent(json, Encoding.UTF8, "application/json")
-                    };
-                    request.Headers.Add(SenderIdHeaderName, Id);
-                    await _http.SendAsync(request);
+                    await _dispatch(peerId, "POST", "/receiveBlock", Id, json);
                 }
                 catch (Exception ex)
                 {
@@ -313,12 +339,7 @@ namespace BitcoinNetworkSimulator
                 if (peerId == Id) continue;
                 try
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{_serverPort}/{peerId}/receiveChain")
-                    {
-                        Content = new StringContent(json, Encoding.UTF8, "application/json")
-                    };
-                    request.Headers.Add(SenderIdHeaderName, Id);
-                    await _http.SendAsync(request);
+                    await _dispatch(peerId, "POST", "/receiveChain", Id, json);
                 }
                 catch (Exception ex)
                 {

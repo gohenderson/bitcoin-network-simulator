@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -50,11 +49,11 @@ namespace BitcoinNetworkSimulator
 
     public sealed class ChainWatcher
     {
-        // Every node shares this one port (see NetworkServer.cs); a node is
-        // addressed by id in the URL path, e.g. http://localhost:5000/000-alpha/chain.
-        private readonly int _port;
+        // Reaches any node's /chain directly, in-process — see
+        // NodeNetwork.DispatchInternalAsync — instead of this watcher
+        // building real HTTP requests against NetworkServer itself.
+        private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private List<string> _nodeIds;
-        private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(2) };
         private readonly object _lock = new();
         private readonly WatcherStore _store;
         private WatcherSnapshot? _lastSnapshot;
@@ -62,12 +61,19 @@ namespace BitcoinNetworkSimulator
         private int _reorganizationsObserved;
         private int _rejectedBlocksObserved;
 
-        public ChainWatcher(int port, List<string> nodeIds, WatcherStore store)
+        public ChainWatcher(NodeNetwork.InternalDispatchFunc dispatch, List<string> nodeIds, WatcherStore store)
         {
-            _port = port;
+            _dispatch = dispatch;
             _nodeIds = new List<string>(nodeIds);
             _store = store;
         }
+
+        // Most recent convergence audit — null until AuditAsync has run at
+        // least once (RunAsync's very first call, before its polling loop
+        // starts). Backs the /dashboard endpoint's chain-height/state
+        // reporting (see Dashboard.cs) with the same data AuditAsync already
+        // computed, instead of running a second, redundant audit.
+        public WatcherSnapshot? LastSnapshot { get { lock (_lock) return _lastSnapshot; } }
 
         public void AddNode(string nodeId)
         {
@@ -145,11 +151,10 @@ namespace BitcoinNetworkSimulator
             {
                 try
                 {
-                    using var response = await _http.GetAsync($"http://localhost:{_port}/{nodeId}/chain");
-                    var body = await response.Content.ReadAsStringAsync();
-                    if (!response.IsSuccessStatusCode)
+                    var (statusCode, body) = await _dispatch(nodeId, "GET", "/chain", null, null);
+                    if (statusCode < 200 || statusCode >= 300)
                     {
-                        audits.Add(new NodeAudit { NodeId = nodeId, StructurallyValid = false, Reason = $"/chain HTTP {(int)response.StatusCode}" });
+                        audits.Add(new NodeAudit { NodeId = nodeId, StructurallyValid = false, Reason = $"/chain HTTP {statusCode}" });
                         continue;
                     }
 
@@ -473,6 +478,31 @@ namespace BitcoinNetworkSimulator
                 }
 
                 transaction.Commit();
+            }
+        }
+
+        // Blocks actually mined, per node, across this run's whole history —
+        // grouped by `node_id` (the SoloMiner that did the hashing and
+        // coordinated the turn), not `built_by` (which an Impersonator sets
+        // to whatever name it's framing — see the "Signed blocks" note in
+        // README.md). Backs the /dashboard endpoint's "top miners by blocks
+        // won" ranking (see Dashboard.cs).
+        public Dictionary<string, int> GetWinCountsByNode()
+        {
+            lock (_lock)
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT node_id, COUNT(*)
+                    FROM events
+                    WHERE event_type = 'block-built' AND node_id IS NOT NULL
+                    GROUP BY node_id;
+                ";
+                using var reader = cmd.ExecuteReader();
+                var result = new Dictionary<string, int>();
+                while (reader.Read())
+                    result[reader.GetString(0)] = reader.GetInt32(1);
+                return result;
             }
         }
 
