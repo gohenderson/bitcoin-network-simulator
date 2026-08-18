@@ -64,6 +64,7 @@ namespace BitcoinNetworkSimulator
             var winCounts = watcherStore.GetWinCountsByNode();
             var lastAudit = watcher.LastSnapshot;
             var totalHashPower = Math.Max(1, snapshot.Nodes.Sum(n => n.HashPower));
+            var validatedNodeCount = Math.Max(1, lastAudit?.Tips.Sum(t => t.NodeIds.Count) ?? 0);
 
             var dashboardNodes = snapshot.Nodes.Select(n => new DashboardNode
             {
@@ -100,7 +101,22 @@ namespace BitcoinNetworkSimulator
                 TopMinersByHashPower = dashboardNodes.Where(n => n.HashPower > 0).OrderByDescending(n => n.HashPower).Take(10).ToList(),
                 TopMinersByBlocksWon = dashboardNodes.Where(n => n.BlocksWon > 0).OrderByDescending(n => n.BlocksWon).Take(10).ToList(),
                 TopByInfluence = dashboardNodes.OrderByDescending(n => n.PeerCount).Take(10).ToList(),
-                AllNodes = dashboardNodes.OrderByDescending(n => n.HashPower).ToList()
+                AllNodes = dashboardNodes.OrderByDescending(n => n.HashPower).ToList(),
+                ReorganizationsObserved = lastAudit?.ReorganizationsObserved ?? 0,
+                Forks = (lastAudit?.Tips ?? new List<TipGroup>()).Select(t => new DashboardFork
+                {
+                    TipHash = t.TipHash,
+                    Height = t.Height,
+                    NodeCount = t.NodeIds.Count,
+                    Share = (double)t.NodeIds.Count / validatedNodeCount,
+                    NodeIds = t.NodeIds
+                }).ToList(),
+                RecentReorganizations = watcherStore.GetRecentReorganizations(10).Select(r => new DashboardReorg
+                {
+                    Timestamp = r.Timestamp,
+                    NodeId = r.NodeId,
+                    Reason = r.Reason
+                }).ToList()
             };
 
             return JsonSerializer.Serialize(summary, JsonOptions);
@@ -132,6 +148,22 @@ namespace BitcoinNetworkSimulator
             public double HashPowerShare { get; init; }
         }
 
+        private sealed class DashboardFork
+        {
+            public string TipHash { get; init; } = "";
+            public int Height { get; init; }
+            public int NodeCount { get; init; }
+            public double Share { get; init; }
+            public List<string> NodeIds { get; init; } = new();
+        }
+
+        private sealed class DashboardReorg
+        {
+            public string Timestamp { get; init; } = "";
+            public string NodeId { get; init; } = "";
+            public string Reason { get; init; } = "";
+        }
+
         private sealed class DashboardSummary
         {
             public string GeneratedAt { get; init; } = "";
@@ -149,6 +181,9 @@ namespace BitcoinNetworkSimulator
             public List<DashboardNode> TopMinersByBlocksWon { get; init; } = new();
             public List<DashboardNode> TopByInfluence { get; init; } = new();
             public List<DashboardNode> AllNodes { get; init; } = new();
+            public int ReorganizationsObserved { get; init; }
+            public List<DashboardFork> Forks { get; init; } = new();
+            public List<DashboardReorg> RecentReorganizations { get; init; } = new();
         }
 
         private const string HtmlPage = @"<!doctype html>
@@ -243,6 +278,19 @@ namespace BitcoinNetworkSimulator
       <h2>Mining pools</h2>
       <div id=""pools""></div>
     </div>
+    <div class=""panel"">
+      <h2>Active forks <span class=""hint"">by tip hash</span></h2>
+      <div id=""forks""></div>
+    </div>
+    <div class=""panel"">
+      <h2>Recent reorganizations</h2>
+      <div style=""max-height:200px; overflow-y:auto;"">
+        <table>
+          <thead><tr><th>Time</th><th>Node</th><th>Reason</th></tr></thead>
+          <tbody id=""reorgs""></tbody>
+        </table>
+      </div>
+    </div>
     <div class=""panel full-width"">
       <h2>All participants</h2>
       <div style=""max-height:420px; overflow-y:auto;"">
@@ -298,6 +346,8 @@ function renderCards(s) {
     ['Pools', s.poolCount],
     ['Total hash power', s.totalHashPower],
     ['Blocks observed', s.blocksObserved],
+    ['Active branches', s.forks.length],
+    ['Reorganizations', s.reorganizationsObserved],
   ];
   document.getElementById('cards').innerHTML = cards.map(function (c) {
     return '<div class=""card""><div class=""value"">' + c[1] + '</div><div class=""label"">' + c[0] + '</div></div>';
@@ -318,6 +368,40 @@ function renderAllNodes(nodes) {
       '<td>' + n.blocksWon + '</td>' +
       '<td>' + n.peerCount + '</td>' +
       '<td>' + n.economicWeight + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+function renderForks(forks) {
+  var el = document.getElementById('forks');
+  if (!forks.length) { el.innerHTML = '<div class=""empty"">No audit yet.</div>'; return; }
+  if (forks.length === 1) {
+    el.innerHTML = '<div class=""empty"">Converged — every validated node is on tip ' +
+      forks[0].tipHash.slice(0, 8) + '… at height ' + forks[0].height + '.</div>';
+    return;
+  }
+  var html = '';
+  forks.forEach(function (f, i) {
+    var pct = Math.max(f.share * 100, 1.5);
+    var title = f.tipHash + '\n' + f.nodeIds.join(', ');
+    html += '<div class=""row"" title=""' + title + '"">' +
+      '<span class=""rank"">#' + (i + 1) + '</span>' +
+      '<span class=""id"">' + f.tipHash.slice(0, 8) + '… @' + f.height + '</span>' +
+      '<span class=""bar-track""><span class=""bar-fill"" style=""width:' + pct + '%""></span></span>' +
+      '<span class=""num"">' + f.nodeCount + ' node(s)</span>' +
+      '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function renderReorgs(reorgs) {
+  var tbody = document.getElementById('reorgs');
+  if (!reorgs.length) { tbody.innerHTML = '<tr><td colspan=""3"" class=""empty"">No reorganizations observed.</td></tr>'; return; }
+  tbody.innerHTML = reorgs.map(function (r) {
+    return '<tr>' +
+      '<td>' + new Date(r.timestamp).toLocaleTimeString() + '</td>' +
+      '<td class=""id"">' + r.nodeId + '</td>' +
+      '<td>' + r.reason + '</td>' +
       '</tr>';
   }).join('');
 }
@@ -349,6 +433,8 @@ function refresh() {
       function (n) { return n.peerCount + ' peers'; },
       function (n) { return n.peerCount / maxPeers; });
     renderPools(s.pools);
+    renderForks(s.forks);
+    renderReorgs(s.recentReorganizations);
     renderAllNodes(s.allNodes);
   }).catch(function (err) { console.error('dashboard refresh failed', err); });
 }

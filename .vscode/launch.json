@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run scenario",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/bin/Debug/net10.0/BitcoinNetworkSimulator.dll",
+            "args": ["${input:scenarioPath}"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
+        }
+    ],
+    "inputs": [
+        {
+            "id": "scenarioPath",
+            "type": "pickString",
+            "description": "Which scenario to run?",
+            "default": "",
+            "options": [
+                { "label": "(none — default single-node start)", "value": "" },
+                { "label": "consensus-rule-switch", "value": "Scenarios/consensus-rule-switch.yaml" },
+                { "label": "economic-hub-topology", "value": "Scenarios/economic-hub-topology.yaml" },
+                { "label": "hash-power-disparity", "value": "Scenarios/hash-power-disparity.yaml" },
+                { "label": "large-scale-organic-growth", "value": "Scenarios/large-scale-organic-growth.yaml" },
+                { "label": "malicious-roles-showcase", "value": "Scenarios/malicious-roles-showcase.yaml" },
+                { "label": "mining-bankruptcy", "value": "Scenarios/mining-bankruptcy.yaml" },
+                { "label": "mining-debasement", "value": "Scenarios/mining-debasement.yaml" },
+                { "label": "mining-difficulty-tradeoff", "value": "Scenarios/mining-difficulty-tradeoff.yaml" },
+                { "label": "mining-pool-adoption", "value": "Scenarios/mining-pool-adoption.yaml" },
+                { "label": "mining-pool-fairness", "value": "Scenarios/mining-pool-fairness.yaml" },
+                { "label": "mining-reinvestment", "value": "Scenarios/mining-reinvestment.yaml" },
+                { "label": "quick-demo", "value": "Scenarios/quick-demo.yaml" },
+                { "label": "value-seeking-competition", "value": "Scenarios/value-seeking-competition.yaml" },
+                { "label": "wallet-only-network", "value": "Scenarios/wallet-only-network.yaml" }
+            ]
+        }
+    ]
+}

@@ -24,6 +24,21 @@ namespace BitcoinNetworkSimulator
         public string Reason { get; init; } = "";
     }
 
+    public sealed class ReorganizationEvent
+    {
+        public string Timestamp { get; init; } = "";
+        public string NodeId { get; init; } = "";
+        public string Reason { get; init; } = "";
+    }
+
+    /// <summary>One currently-live branch: every structurally-valid node sharing the same tip hash.</summary>
+    public sealed class TipGroup
+    {
+        public string TipHash { get; init; } = "";
+        public int Height { get; init; }
+        public List<string> NodeIds { get; init; } = new();
+    }
+
     public sealed class WatcherSnapshot
     {
         public DateTime Timestamp { get; init; } = DateTime.UtcNow;
@@ -38,6 +53,9 @@ namespace BitcoinNetworkSimulator
         public int MaxHeight { get; init; }
         public string CommonTipHash { get; init; } = "";
         public List<NodeAudit> Nodes { get; init; } = new();
+        /// <summary>Every currently-live branch among structurally-valid nodes, most-populated first.</summary>
+        public List<TipGroup> Tips { get; init; } = new();
+        public int ReorganizationsObserved { get; init; }
         public string Explanation { get; init; } = "";
     }
 
@@ -182,11 +200,19 @@ namespace BitcoinNetworkSimulator
             var maxHeight = audits.Count == 0 ? 0 : audits.Max(a => a.Height);
             var distinctTips = audits.Where(a => a.StructurallyValid).Select(a => a.TipHash).Distinct().ToList();
             var converged = allValid && distinctTips.Count == 1;
+            var tips = audits.Where(a => a.StructurallyValid)
+                .GroupBy(a => a.TipHash)
+                .Select(g => new TipGroup { TipHash = g.Key, Height = g.First().Height, NodeIds = g.Select(a => a.NodeId).ToList() })
+                .OrderByDescending(g => g.NodeIds.Count)
+                .ThenByDescending(g => g.Height)
+                .ToList();
             int observedBlocks;
+            int reorganizationsObserved;
             WatcherSnapshot? previousSnapshot;
             lock (_lock)
             {
                 observedBlocks = _blocksObserved;
+                reorganizationsObserved = _reorganizationsObserved;
                 previousSnapshot = _lastSnapshot;
             }
             var blocksSincePreviousAudit = previousSnapshot == null
@@ -226,6 +252,8 @@ namespace BitcoinNetworkSimulator
                 MaxHeight = maxHeight,
                 CommonTipHash = converged ? audits[0].TipHash : "",
                 Nodes = audits,
+                Tips = tips,
+                ReorganizationsObserved = reorganizationsObserved,
                 Explanation = explanation
             };
 
@@ -483,6 +511,33 @@ namespace BitcoinNetworkSimulator
                 var result = new Dictionary<string, int>();
                 while (reader.Read())
                     result[reader.GetString(0)] = reader.GetInt32(1);
+                return result;
+            }
+        }
+
+        /// <summary>The most recent reorganization events, newest first.</summary>
+        public List<ReorganizationEvent> GetRecentReorganizations(int limit)
+        {
+            lock (_lock)
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.CommandText = @"
+                    SELECT timestamp, node_id, reason
+                    FROM events
+                    WHERE event_type = 'reorganization'
+                    ORDER BY id DESC
+                    LIMIT $limit;
+                ";
+                cmd.Parameters.AddWithValue("$limit", limit);
+                using var reader = cmd.ExecuteReader();
+                var result = new List<ReorganizationEvent>();
+                while (reader.Read())
+                    result.Add(new ReorganizationEvent
+                    {
+                        Timestamp = reader.GetString(0),
+                        NodeId = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                        Reason = reader.IsDBNull(2) ? "" : reader.GetString(2)
+                    });
                 return result;
             }
         }
