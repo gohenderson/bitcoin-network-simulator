@@ -5,14 +5,13 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Elastic worker pool: a bounded set of async worker loops pulling from a
-    // shared queue. Starts with `minWorkers` running. If the backlog grows past
-    // `scaleUpQueueThreshold`, it spins up another worker (up to `maxWorkers`).
-    // Idle workers beyond the minimum retire themselves after a timeout, so the
-    // pool grows under load and shrinks back down at rest.
-    // ------------------------------------------------------------------
-
+    /// <summary>
+    /// A bounded set of async worker loops pulling from a shared queue. Starts with
+    /// <c>minWorkers</c> running; if the backlog grows past <c>scaleUpQueueThreshold</c>, it
+    /// spins up another worker (up to <c>maxWorkers</c>). Idle workers beyond the minimum
+    /// retire themselves after a timeout, so the pool grows under load and shrinks back down
+    /// at rest.
+    /// </summary>
     public class ElasticTaskPool
     {
         private readonly string _ownerId;

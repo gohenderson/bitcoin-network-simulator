@@ -4,12 +4,11 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Per-node persistence: restores a node's chain from its blockchain.db
-    // at startup (ResumeFromDisk), then periodically syncs the in-memory
-    // chain back to that same file for the rest of the run (RunAsync). One
-    // RunAsync loop per node, started from NodeNetwork.AddNodeAsync.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// Per-node persistence: restores a node's chain from its <c>blockchain.db</c> at startup
+    /// (<see cref="ResumeFromDisk"/>), then periodically syncs the in-memory chain back to
+    /// that same file for the rest of the run (<see cref="RunAsync"/>).
+    /// </summary>
     public static class PersistenceLoop
     {
         private const int SyncIntervalMs = 3000;

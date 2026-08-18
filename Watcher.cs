@@ -8,12 +8,6 @@ using Microsoft.Data.Sqlite;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Research watcher plumbing — tracks build/accept/reject/reorg events across
-    // the whole simulated network and periodically audits every node's /chain
-    // endpoint to report on convergence, not just what any single node believes.
-    // ------------------------------------------------------------------
-
     public enum NetworkState
     {
         Healthy,
@@ -47,11 +41,13 @@ namespace BitcoinNetworkSimulator
         public string Explanation { get; init; } = "";
     }
 
+    /// <summary>
+    /// Tracks build/accept/reject/reorg events across the whole simulated network and
+    /// periodically audits every node's <c>/chain</c> endpoint to report on convergence, not
+    /// just what any single node believes.
+    /// </summary>
     public sealed class ChainWatcher
     {
-        // Reaches any node's /chain directly, in-process — see
-        // NodeNetwork.DispatchInternalAsync — instead of this watcher
-        // building real HTTP requests against NetworkServer itself.
         private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private List<string> _nodeIds;
         private readonly object _lock = new();
@@ -68,11 +64,7 @@ namespace BitcoinNetworkSimulator
             _store = store;
         }
 
-        // Most recent convergence audit — null until AuditAsync has run at
-        // least once (RunAsync's very first call, before its polling loop
-        // starts). Backs the /dashboard endpoint's chain-height/state
-        // reporting (see Dashboard.cs) with the same data AuditAsync already
-        // computed, instead of running a second, redundant audit.
+        /// <summary>Most recent convergence audit, or null until <see cref="AuditAsync"/> has run at least once.</summary>
         public WatcherSnapshot? LastSnapshot { get { lock (_lock) return _lastSnapshot; } }
 
         public void AddNode(string nodeId)
@@ -83,10 +75,11 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Called by NodeNetwork.RemoveNode (churn) so AuditAsync stops
-        // polling a departed node's /chain endpoint — otherwise every future
-        // audit would find it 404ing and permanently mark it structurally
-        // invalid, skewing AllChainsValid/ChainsConverged.
+        /// <summary>
+        /// Stops <see cref="AuditAsync"/> from polling a departed node's <c>/chain</c>
+        /// endpoint — otherwise every future audit would find it 404ing and permanently mark
+        /// it structurally invalid.
+        /// </summary>
         public void RemoveNode(string nodeId)
         {
             lock (_lock)
@@ -132,9 +125,11 @@ namespace BitcoinNetworkSimulator
             _store.InsertEvent(DateTime.UtcNow, "reorganization", nodeId, reason: reason);
         }
 
-        // See the "Peer discouragement" note in README.md — nodeId dropped
-        // peerId from its own peer set after peerId sent it something that
-        // failed nodeId's own validation for reasons attributable to peerId.
+        /// <summary>
+        /// Records that <paramref name="nodeId"/> dropped <paramref name="peerId"/> from its
+        /// own peer set after <paramref name="peerId"/> sent it something that failed
+        /// <paramref name="nodeId"/>'s own validation for reasons attributable to it.
+        /// </summary>
         public void ObserveDiscouraged(string nodeId, string peerId, string reason)
         {
             _store.InsertEvent(DateTime.UtcNow, "peer-discouraged", nodeId, reason: $"discouraged peer {peerId}: {reason}");
@@ -276,27 +271,14 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // SQLite-backed persistence for ChainWatcher. One watcher.db lives in
-    // each run's result folder (see RunRootDir in Program.cs), containing:
-    //
-    //   run_info    - one row identifying this run (started_at, port, scenario)
-    //   events      - the append-only event log (block-built/accepted/rejected,
-    //                 reorganizations, network state transitions), with fields
-    //                 like nonce, role, and tx_count broken out into real,
-    //                 directly queryable columns.
-    //   audits      - one row per periodic convergence audit (ChainWatcher.AuditAsync)
-    //   audit_nodes - each audited node's per-audit height/tip/validity, FK'd to audits
-    //
-    // All timestamps are stored as UTC ISO-8601 ("O" format), which sorts
-    // lexicographically, so time-range queries need no date parsing.
-    //
-    // A single SqliteConnection is reused for the run's lifetime, with all
-    // access serialized through _lock — SQLite (even in WAL mode) doesn't
-    // support concurrent use of one connection from multiple threads, and
-    // ChainWatcher's Observe*/AuditAsync methods can be called concurrently
-    // from many nodes' request handlers plus the audit loop.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// SQLite-backed persistence for <see cref="ChainWatcher"/>. One <c>watcher.db</c> lives
+    /// in each run's result folder, with tables for run info, the append-only event log, and
+    /// periodic convergence audits (plus each audited node's per-audit result). A single
+    /// connection is reused for the run's lifetime, with all access serialized through a lock,
+    /// since <see cref="ChainWatcher"/>'s observe/audit methods can be called concurrently
+    /// from many nodes' request handlers plus the audit loop.
+    /// </summary>
     public sealed class WatcherStore : IDisposable
     {
         private readonly object _lock = new();
@@ -481,12 +463,11 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Blocks actually mined, per node, across this run's whole history —
-        // grouped by `node_id` (the SoloMiner that did the hashing and
-        // coordinated the turn), not `built_by` (which an Impersonator sets
-        // to whatever name it's framing — see the "Signed blocks" note in
-        // README.md). Backs the /dashboard endpoint's "top miners by blocks
-        // won" ranking (see Dashboard.cs).
+        /// <summary>
+        /// Blocks actually mined, per node, across this run's whole history — grouped by the
+        /// mining node's own id, not the block's <c>built_by</c> (which an impersonator sets
+        /// to whatever name it's framing).
+        /// </summary>
         public Dictionary<string, int> GetWinCountsByNode()
         {
             lock (_lock)

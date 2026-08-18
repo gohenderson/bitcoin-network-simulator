@@ -10,59 +10,21 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // The mining/broadcast engine for a single node: searching for a valid
-    // nonce, assembling a candidate block's transactions (solo, on behalf of
-    // a pool, or the Equivocator's dual candidates), and gossiping the result
-    // to peers. A SoloMiner doesn't hold a reference to the Node it mines
-    // for — it's handed its own copies of exactly what it needs (identity,
-    // chain, mempool, network callbacks) at construction time. That's what
-    // lets NodeNetwork.AddNodeAsync build a SoloMiner independently of Node
-    // rather than the two being circularly dependent on each other. The
-    // Chain and Mempool instances are shared with the owning Node — both are
-    // constructed once by that same composition root and passed to Node and
-    // SoloMiner alike, so they're always looking at the same state.
-    //
-    // A SoloMiner mines on its own behalf (MineOneRoundAsync, satisfying
-    // IMiner, below) when it isn't in a pool, but also does the
-    // actual mining work FOR a PoolMiner (below) when chosen, by
-    // weighted random draw, to coordinate that pool's turn — MineForPoolAsync
-    // is that entry point. Either way, it's this SoloMiner's own chain,
-    // mempool, and network plumbing doing the work; only who the reward is
-    // paid to and how many nonces get tried differ.
-    //
-    // A SoloMiner also owns this node's signing identity: `signingKey` is
-    // handed in already loaded from NodeMetadata.SigningKey (or freshly
-    // generated for a brand new node — see NodeMetadataStore.LoadOrCreateAsync),
-    // so the same identity persists across restarts. Its public half is
-    // registered under this node's Id in NodeIdentityRegistry — the
-    // constructor is the very first thing this identity does, before it
-    // could ever legitimately appear as BuiltBy in any block — and every
-    // block this SoloMiner mines (solo, pooled, or either half of an
-    // Equivocator's pair) gets signed with the private half before being
-    // handed off. See the "Signed blocks" note in README.md.
-    // ------------------------------------------------------------------
-
+    /// <summary>
+    /// The mining/broadcast engine for a single node: searches for a valid nonce, assembles a
+    /// candidate block's transactions (solo, on behalf of a pool, or an equivocator's dual
+    /// candidates), and gossips the result to peers. Also owns this node's signing identity,
+    /// registering its public key in <see cref="NodeIdentityRegistry"/> at construction.
+    /// </summary>
     public class SoloMiner : IMiner
     {
         public string Id { get; }
-        // Mutable (private set) so Reinvestment (see MineAndBroadcastSingleRoundAsync)
-        // can grow it at runtime; read fresh everywhere it's used (MineBlock,
-        // the CostPerAttempt threshold), never cached, so a mid-turn increase
-        // is picked up automatically with no other code changes.
         public int HashPower { get; private set; }
         public string Label => Id;
         public NodeRole Role => _role;
 
         private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private readonly NodeRole _role;
-        // This node's own timeline of which ConsensusRules is active at
-        // which height — see RuleSchedule's own comment in Blockchain.cs.
-        // Sourced from NodeMetadata.RuleSchedule at construction, and looked
-        // up fresh for the height being built each time this SoloMiner
-        // mines (solo, pooled, or either half of an Equivocator's pair) —
-        // NOT cached once, since the active ruleset can change from one
-        // height to the next.
         private readonly RuleSchedule _ruleSchedule;
         private readonly Blockchain _chain;
         private readonly ConcurrentQueue<Transaction> _mempool;
@@ -70,60 +32,21 @@ namespace BitcoinNetworkSimulator
         private readonly ChainWatcher _watcher;
         private readonly ECDsa _signingKey;
         private readonly Random _rng = new(Guid.NewGuid().GetHashCode());
-        // $ cost of a single mining attempt — see ScenarioNodeGroup.CostPerAttempt
-        // and RuleSchedule.BestValueAt. 0 (default) means mining is free, so the
-        // idle check in MineAndBroadcastSingleRoundAsync never triggers.
         private readonly decimal _costPerAttempt;
-        // Tracks whether the LAST turn was spent idle, purely so the
-        // going-idle/resuming-mining console lines only print on the transition,
-        // not every single turn of what could be a long idle stretch.
         private bool _idleLastTurn = false;
-        // $ fixed cost owed every turn regardless of outcome — see
-        // ScenarioNodeGroup.CostOfLiving. 0 (default) disables the insolvency
-        // check in MineAndBroadcastSingleRoundAsync entirely.
         private readonly decimal _costOfLiving;
-        // $ runway on top of on-chain net worth before CostOfLiving can push
-        // this node into insolvency — see ScenarioNodeGroup.StartingCapital.
         private readonly decimal _startingCapital;
-        // Cumulative CostOfLiving owed since this node's creation — never
-        // reset, since "cumulative overhead exceeds cumulative wealth" is the
-        // right long-run solvency test; see MineAndBroadcastSingleRoundAsync.
         private decimal _accruedLivingCost = 0m;
-        // Lets this SoloMiner remove ITSELF from the network on insolvency —
-        // see NodeNetwork.AddNodeAsync's requestForcedChurn closure.
         private readonly Action _requestForcedChurn;
-        // $ cost to buy +1 HashPower — see ScenarioNodeGroup.HashPowerCost. 0
-        // (default) disables the reinvestment check entirely.
         private readonly decimal _hashPowerCost;
-        // Upper bound HashPowerCost-driven reinvestment won't grow HashPower
-        // past — see ScenarioNodeGroup.MaxHashPower. 0 means uncapped.
         private readonly int _maxHashPower;
-        // Cumulative $ already committed to past HashPower purchases — never
-        // reset, mirrors _accruedLivingCost; see MineAndBroadcastSingleRoundAsync.
         private decimal _investedInHashPower = 0m;
-        // Names of pools this node reconsiders joining every turn — see
-        // ScenarioNodeGroup.PoolCandidates and ReconsiderPoolMembership.
-        // Empty (default) disables reconsideration entirely.
         private readonly List<string> _poolCandidates;
-        // Own solo win-probability cutoff below which ReconsiderPoolMembership
-        // optimizes for realization instead of expected value — see
-        // ScenarioNodeGroup.PoolAdoptionThreshold.
         private readonly decimal _poolAdoptionThreshold;
-        // The pool this node currently believes it belongs to (null = solo) —
-        // mirrors NodeNetwork's own actual placement, kept in sync by
-        // ReconsiderPoolMembership so it never has to ask NodeNetwork what its
-        // own state is. Seeded from ScenarioNodeGroup.Pool at construction.
         private string? _currentPool;
-        // Looks up a named pool's current total HashPower (0 if it doesn't
-        // exist yet) — see NodeNetwork.GetPoolHashPower.
         private readonly Func<string, int> _getPoolHashPower;
-        // Moves this node between solo and a named pool (null = solo) — see
-        // NodeNetwork.SwitchPoolMembership.
         private readonly Action<string?> _requestPoolSwitch;
 
-        // `dispatch` reaches any peer node directly, in-process — see
-        // NodeNetwork.DispatchInternalAsync — instead of this miner
-        // building real HTTP requests against NetworkServer itself.
         public SoloMiner(string id, NodeNetwork.InternalDispatchFunc dispatch, NodeRole role, int hashPower, decimal costPerAttempt, decimal costOfLiving, decimal startingCapital, Action requestForcedChurn, decimal hashPowerCost, int maxHashPower, List<string> poolCandidates, decimal poolAdoptionThreshold, string? initialPool, Func<string, int> getPoolHashPower, Action<string?> requestPoolSwitch, RuleSchedule ruleSchedule, Blockchain chain, ConcurrentQueue<Transaction> mempool,
             Func<List<string>> getPeerIds, ChainWatcher watcher, ECDsa signingKey)
         {
@@ -151,28 +74,17 @@ namespace BitcoinNetworkSimulator
             NodeIdentityRegistry.Register(Id, _signingKey.ExportSubjectPublicKeyInfo());
         }
 
-        // Signs `hashHex` (a block's own Hash) with this node's private
-        // signing key, hex-encoded for storage in Block.Signature. Whoever
-        // calls this can put any name they like in BuiltBy, but the
-        // signature it produces only ever verifies against THIS node's own
-        // registered key — see NodeIdentityRegistry.
-        private string Sign(string hashHex)
+        private string SignBlockHash(string hashHex)
         {
             var hashBytes = Convert.FromHexString(hashHex);
             var signatureBytes = _signingKey.SignHash(hashBytes);
             return Convert.ToHexString(signatureBytes).ToLowerInvariant();
         }
 
-        // Called by the network's round-robin scheduler (via IMiner) to
-        // perform one mining turn: try up to HashPower nonces, broadcast if
-        // one meets the target, otherwise return control to the scheduler
-        // empty-handed — this turn simply didn't win, exactly like a real
-        // miner's hash budget for this slice of time coming up empty. See
-        // the "Mining" note in README.md.
         public async Task MineOneRoundAsync(CancellationToken token)
         {
             ReconsiderPoolMembership();
-            if (_currentPool != null) return; // just switched into a pool — scheduled as part of it next sweep instead
+            if (_currentPool != null) return;
 
             try
             {
@@ -188,19 +100,14 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Called once per this node's own turn — whether currently solo (from
-        // MineOneRoundAsync) or pooled (from PoolMiner.MineOneRoundAsync, for
-        // every member, not just whoever coordinates) — to decide whether to
-        // stay put or move. Below PoolAdoptionThreshold, this node's own solo
-        // win probability is judged too unlikely to ever pay off, so it
-        // optimizes for REALIZATION: join whichever option (including its
-        // current pool) maximizes the GROUP's win probability, ignoring
-        // dilution entirely — a diluted share of a group that actually wins
-        // beats a share of one that almost never does. At or above the
-        // threshold, EV wins instead — which is always solo, since a
-        // proportional share of a bigger pool is never bigger than the
-        // reward kept whole — so it leaves any pool it's in. See "Pool
-        // adoption" in README.md.
+        /// <summary>
+        /// Called once per this node's own turn — solo or pooled — to decide whether to stay
+        /// put or move. Below the pool adoption threshold this node optimizes for
+        /// realization: it joins whichever option (including its current pool) maximizes the
+        /// group's win probability, ignoring dilution. At or above the threshold it always
+        /// prefers solo, since a proportional share of a bigger pool is never bigger than the
+        /// reward kept whole.
+        /// </summary>
         public void ReconsiderPoolMembership()
         {
             if (_poolCandidates.Count == 0) return;
@@ -244,10 +151,6 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Called by a PoolMiner this SoloMiner belongs to, when weighted
-        // random choice (favoring higher-HashPower members) picks THIS
-        // member to coordinate the pool's turn — see the "Mining pools" note
-        // in README.md and the PoolMiner class below.
         public async Task MineForPoolAsync(string poolLabel, int totalHashPower, IReadOnlyList<SoloMiner> members, CancellationToken token)
         {
             try
@@ -261,12 +164,11 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // The core proof-of-work search: tries at most `attempts` nonces
-        // looking for a hash that satisfies expectedTargetHex, returning null
-        // if none of them do (this node's hash-power budget for the turn is
-        // exhausted) or if we're shutting down. Runs synchronously (no awaits)
-        // since it executes on this node's own dedicated LongRunning thread
-        // already.
+        /// <summary>
+        /// The core proof-of-work search: tries at most <paramref name="attempts"/> nonces
+        /// looking for a hash that satisfies <paramref name="expectedTargetHex"/>, returning
+        /// null if none of them do or if mining is being cancelled.
+        /// </summary>
         private Block? MineBlock(Block parent, string expectedTargetHex, ConsensusRules rules, List<Transaction> txs, string builtByLabel, int attempts, CancellationToken token)
         {
             var candidate = new Block
@@ -289,15 +191,15 @@ namespace BitcoinNetworkSimulator
                 if (ProofOfWork.MeetsTarget(candidate.Hash, expectedTargetHex))
                     return candidate;
             }
-            return null; // exhausted this turn's hash-power budget without finding a valid nonce
+            return null;
         }
 
-        // Simulates including `candidates` in order against a starting balance
-        // snapshot, dropping (and logging) any transaction its sender can't
-        // actually afford at that point — including a second transaction from a
-        // sender the first one already drained. `balances` is mutated in place
-        // so callers can chain further inclusions (e.g. after the coinbase
-        // credit) on top of the result.
+        /// <summary>
+        /// Simulates including <paramref name="candidates"/> in order against a starting
+        /// balance snapshot, dropping (and logging) any transaction its sender can't actually
+        /// afford at that point. <paramref name="balances"/> is mutated in place so callers
+        /// can chain further inclusions on top of the result.
+        /// </summary>
         private List<Transaction> FilterAffordable(List<Transaction> candidates, Dictionary<string, decimal> balances)
         {
             var accepted = new List<Transaction>();
@@ -318,35 +220,15 @@ namespace BitcoinNetworkSimulator
             return accepted;
         }
 
-        // Honest, Impersonator, Corruptor, and Withholder all mine exactly one
-        // block per round. What differs is the identity label (decided BEFORE
-        // mining — it's part of the hashed payload, so it can't be swapped in
-        // after the fact for free), whether it's tampered after hashing, and who
-        // gets told about it.
         private async Task MineAndBroadcastSingleRoundAsync(CancellationToken token)
         {
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
             var height = parent.Index + 1;
-            var simulatedBalances = Ledger.ComputeBalances(ancestors); // hoisted — reused below AND by the insolvency check
+            var simulatedBalances = Ledger.ComputeBalances(ancestors);
 
-            // Every $ figure below is nominal — multiplied by
-            // DebasementFactorAt(height) at the point of use, the same way
-            // RuleSchedule already applies it to PriceSchedule's own lookups
-            // (BestCandidateAt) — so a scenario's DebasementRatePerBlock
-            // erodes CostOfLiving/CostPerAttempt/HashPowerCost exactly like
-            // it erodes the coin's own $ price. See "Debasement" in README.md.
             var debasement = _ruleSchedule.DebasementFactorAt(height);
 
-            // Cost of living: a FIXED bill owed every turn regardless of whether this
-            // node mines, unlike CostPerAttempt (only owed while actively trying
-            // nonces) — see "Cost of living" in README.md. Compared against this
-            // node's actual on-chain balance's current $ value, not settled via an
-            // on-chain transaction — there's no natural recipient, and letting a
-            // node "spend" what it doesn't have would contradict FilterAffordable's
-            // rule everywhere else. Accrues every turn regardless of outcome so
-            // idling doesn't dodge it; never resets, since "cumulative overhead
-            // exceeds cumulative wealth" is the right long-run solvency test.
             if (_costOfLiving > 0m && _ruleSchedule.IsValueSeeking)
             {
                 _accruedLivingCost += _costOfLiving * debasement;
@@ -359,17 +241,6 @@ namespace BitcoinNetworkSimulator
                 }
             }
 
-            // Reinvestment: once this node's own EARNED profit (net worth beyond what's
-            // already committed to accrued living cost or past hardware purchases)
-            // covers HashPowerCost, it buys +1 HashPower — modeling real hash power
-            // reinvesting profit into more hardware instead of just banking it. Same
-            // virtual-ledger approach as CostOfLiving: _investedInHashPower is a
-            // running tally compared against net worth, not an actual on-chain
-            // transaction. Deliberately doesn't draw on StartingCapital — that's a
-            // solvency buffer, not investable capital — so a node still running on its
-            // starting cushion doesn't "reinvest" money it hasn't actually made. At
-            // most one purchase per turn, so growth is gradual and observable. See
-            // "Reinvestment" in README.md.
             if (_hashPowerCost > 0m && _ruleSchedule.IsValueSeeking && (_maxHashPower <= 0 || HashPower < _maxHashPower))
             {
                 var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
@@ -383,12 +254,6 @@ namespace BitcoinNetworkSimulator
                 }
             }
 
-            // Real operating cost (electricity, hardware) is the same regardless
-            // of which candidate ruleset it's spent on, so it never changes WHICH
-            // one is most profitable (RuleSchedule.MostProfitableAt is untouched)
-            // — it only ever changes whether ANYTHING is worth mining this turn.
-            // Mempool transactions are untouched here (dequeued further below,
-            // never reached on an idle turn), so nothing is lost by sitting out.
             var effectiveCostPerAttempt = _costPerAttempt * debasement;
             if (_costPerAttempt > 0m && _ruleSchedule.BestValueAt(height) <= effectiveCostPerAttempt * HashPower)
             {
@@ -426,21 +291,11 @@ namespace BitcoinNetworkSimulator
             var block = MineBlock(parent, expectedTarget, rules, txs, builtBy, HashPower, token);
             if (block == null)
             {
-                // This turn didn't win — none of our HashPower nonce attempts met
-                // the target (or we're shutting down). Give the ordinary
-                // transactions back so they aren't lost (the coinbase entry, if
-                // any, was never "spent" — it just doesn't exist unless this
-                // exact block gets mined); we'll get another turn shortly.
                 foreach (var tx in pending) _mempool.Enqueue(tx);
                 return;
             }
 
-            // Signed with THIS node's own key regardless of what builtBy
-            // claims — an Impersonator can put any name it likes in the
-            // block, but the signature only ever proves it came from this
-            // node's real identity, not the framed one. See the "Signed
-            // blocks" note in README.md.
-            block.Signature = Sign(block.Hash);
+            block.Signature = SignBlockHash(block.Hash);
 
             if (fakeIdentity)
                 Console.WriteLine($"[{Id}] (Impersonator) mined block #{block.Index} (nonce {block.Nonce}) falsely claiming it was built by {builtBy}" +
@@ -448,14 +303,6 @@ namespace BitcoinNetworkSimulator
 
             if (_role == NodeRole.Corruptor)
             {
-                // Tamper AFTER a valid nonce was already found. If Transactions[0] is
-                // the coinbase entry (the common case), this inflates the claimed
-                // reward — which gets caught THREE ways: the hash no longer
-                // matches the block's contents, a freshly different hash essentially
-                // never still satisfies a hard target by chance, AND independently,
-                // every peer recomputes what the coinbase amount SHOULD be and will
-                // reject a mismatch outright even if the other two checks somehow
-                // didn't catch it.
                 if (block.Transactions.Count > 0)
                     block.Transactions[0].Amount += 1000m;
                 else
@@ -483,22 +330,12 @@ namespace BitcoinNetworkSimulator
             await SendChain(currentPeers);
         }
 
-        // Mines one turn on behalf of a pool: tries up to `totalHashPower`
-        // nonces — the sum of every current member's own HashPower — instead
-        // of just this SoloMiner's own. If successful, the coinbase reward is
-        // paid to `poolLabel` (not to this node), then immediately split among
-        // `members` proportional to each one's HashPower share, as ordinary
-        // balance-checked transactions right after the coinbase entry in the
-        // very same block. No new validation rules are needed for that split:
-        // ValidateChain already accepts it as a plain sequence of regular
-        // transactions from an account (the pool) that the coinbase
-        // transaction immediately before it, earlier in the same block,
-        // already credited — see the "Balances & double-spends" note in
-        // README.md. This node's own mempool/chain/network plumbing builds and
-        // broadcasts the block; BuiltBy is this node's own Id, since the
-        // pool already chose this SoloMiner, by weighted random draw favoring
-        // higher-HashPower members, to stand in as its coordinator for this
-        // turn — see the "Mining pools" note in README.md.
+        /// <summary>
+        /// Mines one turn on behalf of a pool: tries up to <paramref name="totalHashPower"/>
+        /// nonces — the sum of every current member's own HashPower. If successful, the
+        /// coinbase reward is paid to <paramref name="poolLabel"/>, then immediately split
+        /// among <paramref name="members"/> proportional to each one's HashPower share.
+        /// </summary>
         private async Task MineAndBroadcastPooledAsync(string poolLabel, int totalHashPower, IReadOnlyList<SoloMiner> members, CancellationToken token)
         {
             var parent = _chain.Latest;
@@ -523,9 +360,6 @@ namespace BitcoinNetworkSimulator
                 for (int i = 0; i < members.Count; i++)
                 {
                     var member = members[i];
-                    // The last member absorbs whatever rounding left over, so the
-                    // pool's account always nets back to exactly zero rather than
-                    // accumulating undistributed dust.
                     var share = i == members.Count - 1
                         ? reward - distributed
                         : Math.Round(reward * member.HashPower / totalHashPower, 8);
@@ -548,7 +382,7 @@ namespace BitcoinNetworkSimulator
                 return;
             }
 
-            block.Signature = Sign(block.Hash);
+            block.Signature = SignBlockHash(block.Hash);
 
             Console.WriteLine($"[{poolLabel}] *** mined block #{block.Index} (nonce {block.Nonce}, target {block.Target[..8]}...) " +
                 $"— built by {Id} on behalf of {members.Count} pool member(s) contributing {totalHashPower} combined hash power, " +
@@ -561,11 +395,11 @@ namespace BitcoinNetworkSimulator
             await SendChain(currentPeers);
         }
 
-        // Equivocator: has to mine TWO separate valid blocks on the same parent to
-        // fork the network — real, doubled computational cost. Both blocks claim
-        // the same (correct) reward, since only whichever one actually survives on
-        // the eventual winning chain will ever count — the other is simply never
-        // adopted anywhere.
+        /// <summary>
+        /// Mines two separate valid blocks on the same parent to fork the network — real,
+        /// doubled computational cost. Both blocks claim the same reward, since only whichever
+        /// one actually survives on the eventual winning chain will ever count.
+        /// </summary>
         private async Task MineAndBroadcastEquivocationAsync(CancellationToken token)
         {
             var parent = _chain.Latest;
@@ -607,14 +441,11 @@ namespace BitcoinNetworkSimulator
                 foreach (var tx in pending) _mempool.Enqueue(tx);
                 return;
             }
-            blockA.Signature = Sign(blockA.Hash);
+            blockA.Signature = SignBlockHash(blockA.Hash);
 
             var blockB = MineBlock(parent, expectedTarget, rules, txsB, Id, HashPower, token);
             if (blockB == null)
             {
-                // Only the first attempt won within its HashPower budget — don't
-                // waste the real work already spent; just broadcast what we have,
-                // honestly.
                 _watcher.ObserveBuild(Id, blockA, _role);
                 _chain.AppendTrusting(blockA);
                 var earlyPeers = _getPeerIds();
@@ -622,7 +453,7 @@ namespace BitcoinNetworkSimulator
                 await SendChain(earlyPeers);
                 return;
             }
-            blockB.Signature = Sign(blockB.Hash);
+            blockB.Signature = SignBlockHash(blockB.Hash);
 
             _watcher.ObserveBuild(Id, blockA, _role);
             _watcher.ObserveBuild(Id, blockB, _role);
@@ -680,23 +511,11 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // A mining pool: a named group of SoloMiners (see Miner.cs) that mines as
-    // one combined IMiner instead of each member getting its own separate
-    // turn — see the "Mining pools" note in README.md. This is where all
-    // pool-specific logic lives — combining member HashPower, picking who
-    // coordinates a given turn, splitting the reward — so the round-robin
-    // scheduler (MiningScheduler.RunAsync) never has to know a pool
-    // is anything other than one more IMiner.
-    //
-    // Membership starts with whatever's passed to the constructor and can
-    // grow afterward via AddMember as new nodes join this pool over the
-    // network's lifetime (see NodeNetwork.AddNodeAsync) — the pool itself is the
-    // one place that needs to track that, precisely so nothing else has to.
-    // Reads and writes to the member list are locked because AddMember (from
-    // the node-growth loop) and MineOneRoundAsync (from the mining loop) run
-    // on independent, concurrently-executing loops.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// A named group of <see cref="SoloMiner"/>s that mines as one combined <see cref="IMiner"/>
+    /// instead of each member getting its own separate turn — combining member hash power,
+    /// picking who coordinates a given turn, and splitting the reward.
+    /// </summary>
     public class PoolMiner : IMiner
     {
         public string Label { get; }
@@ -719,28 +538,16 @@ namespace BitcoinNetworkSimulator
 
         public int MemberCount { get { lock (_lock) { return _members.Count; } } }
 
-        // Snapshot copy of current members — used by NodeNetwork.GetSnapshot
-        // (dashboard reporting) to attribute each member's own HashPower and
-        // pool affiliation without exposing the live, lock-guarded list itself.
         public IReadOnlyList<SoloMiner> Members { get { lock (_lock) { return _members.ToList(); } } }
 
-        // This pool's current combined HashPower — see NodeNetwork.GetPoolHashPower,
-        // which a candidate-evaluating SoloMiner elsewhere uses to weigh joining.
         public int TotalHashPower { get { lock (_lock) { return _members.Sum(m => m.HashPower); } } }
 
-        // Used by NodeNetwork.RemoveNode (churn) to drop a departing member.
-        // Returns whether the id was actually a member — MemberCount == 0
-        // afterward tells the caller this pool has no one left and should be
-        // torn down entirely, since MineOneRoundAsync assumes at least one
-        // member (WeightedRandomMember indexes into a non-empty list).
+        /// <summary>Removes a departing member. Returns whether the id was actually a member.</summary>
         public bool RemoveMemberIfPresent(string nodeId)
         {
             lock (_lock) { return _members.RemoveAll(m => m.Id == nodeId) > 0; }
         }
 
-        // Used by NodeNetwork.SwitchPoolMembership, which — unlike
-        // RemoveMemberIfPresent — needs the actual SoloMiner object back so it
-        // can re-add it wherever the node decided to move to.
         public bool TryRemoveMember(string nodeId, out SoloMiner? member)
         {
             lock (_lock)
@@ -753,12 +560,6 @@ namespace BitcoinNetworkSimulator
 
         public async Task MineOneRoundAsync(CancellationToken token)
         {
-            // Give every member a chance to reconsider — not just whoever ends
-            // up coordinating below, since a low-HashPower member could go a
-            // long time without ever being picked. Reconsideration happens
-            // against a separate snapshot, then a fresh one is taken for the
-            // actual round so a member that just left doesn't still count
-            // toward this round's total HashPower or coordinator draw.
             List<SoloMiner> forReconsideration;
             lock (_lock) { forReconsideration = new List<SoloMiner>(_members); }
             foreach (var member in forReconsideration)
@@ -766,19 +567,17 @@ namespace BitcoinNetworkSimulator
 
             List<SoloMiner> members;
             lock (_lock) { members = new List<SoloMiner>(_members); }
-            if (members.Count == 0) return; // every member reconsidered its way out this round
+            if (members.Count == 0) return;
 
             var totalHashPower = members.Sum(m => m.HashPower);
             var coordinator = WeightedRandomMember(members, totalHashPower, _rng);
             await coordinator.MineForPoolAsync(Label, totalHashPower, members, token);
         }
 
-        // Picks one member at random, weighted by each member's own
-        // HashPower — this is what determines who coordinates (builds, mines,
-        // and broadcasts) this turn on the pool's behalf, and since the
-        // coordinator ends up as the block's BuiltBy, it also gives
-        // higher-HashPower members a proportionally larger share of that
-        // narrative credit.
+        /// <summary>
+        /// Picks one member at random, weighted by each member's own HashPower, to coordinate
+        /// (build, mine, and broadcast) this turn on the pool's behalf.
+        /// </summary>
         private static SoloMiner WeightedRandomMember(List<SoloMiner> members, int totalHashPower, Random rng)
         {
             var roll = rng.Next(totalHashPower);
@@ -792,28 +591,15 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // Common mining entry point implemented by both SoloMiner (an individual
-    // node mining on its own, above) and PoolMiner (a named group of
-    // SoloMiners mining as one combined entity, above). The
-    // round-robin scheduler (MiningScheduler.RunAsync) works purely
-    // in terms of IMiner and deliberately knows nothing about pools, roles,
-    // or hash power: it just orders whatever IMiners currently exist and
-    // gives each one a turn. All of that — whether a node mines solo or as
-    // part of a pool, how a pool picks who coordinates its turn, how a pool
-    // splits its reward — is decided when a miner is created (see
-    // NodeNetwork.AddNodeAsync) and, for pools, inside PoolMiner itself.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// Common mining entry point implemented by both <see cref="SoloMiner"/> and
+    /// <see cref="PoolMiner"/>. <see cref="MiningScheduler"/> works purely in terms of this
+    /// interface and knows nothing about pools, roles, or hash power.
+    /// </summary>
     public interface IMiner
     {
-        // Stable identity used to key this miner's spot in the scheduler's
-        // per-block random turn order (MiningScheduler.OrderKeys) — a node's Id
-        // for a SoloMiner, a pool's name for a PoolMiner.
         string Label { get; }
 
-        // Perform one mining turn: try to find a valid block and broadcast
-        // it, or return having found nothing — see the "Mining" note in
-        // README.md for what "one turn" means.
         Task MineOneRoundAsync(CancellationToken token);
     }
 }

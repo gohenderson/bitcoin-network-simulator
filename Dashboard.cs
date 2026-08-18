@@ -8,20 +8,12 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // The web dashboard: a self-contained HTML/JS page (served at
-    // /dashboard/) that polls a JSON summary endpoint (/dashboard/summary)
-    // for participant counts, top miners by hash power/blocks won, peer-graph
-    // influence, and pool composition. NetworkServer routes both under the
-    // reserved "dashboard" path segment (see NetworkServer.cs) straight to
-    // HandleAsync below, bypassing node resolution entirely — this reads
-    // network-wide state (NodeNetwork.GetSnapshot, WatcherStore's event log,
-    // ChainWatcher's last audit), never a single node's.
-    //
-    // The page is plain, dependency-free HTML/CSS/JS returned as one string
-    // constant: no build step, no CDN fetch, nothing that could fail to load
-    // on an air-gapped localhost run.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// The web dashboard: a self-contained HTML/JS page (served at <c>/dashboard/</c>) that
+    /// polls a JSON summary endpoint (<c>/dashboard/summary</c>) for participant counts, top
+    /// miners by hash power/blocks won, peer-graph influence, and pool composition. Reads
+    /// network-wide state rather than any single node's.
+    /// </summary>
     public static class Dashboard
     {
         public static async Task HandleAsync(HttpListenerContext ctx, string route, NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher)
@@ -61,13 +53,11 @@ namespace BitcoinNetworkSimulator
             res.OutputStream.Close();
         }
 
-        // Combines NodeNetwork's live participation/influence snapshot with
-        // WatcherStore's historical win counts and ChainWatcher's most recent
-        // convergence audit into the one JSON payload the page's JS renders.
-        // HashPowerShare is against total hash power across every mining
-        // node (solo and pooled alike) — 0 when nobody mines yet, guarded by
-        // the Math.Max(1, ...) floor below rather than a divide-by-zero check
-        // at every call site.
+        /// <summary>
+        /// Combines the network's live participation/influence snapshot with historical win
+        /// counts and the most recent convergence audit into the one JSON payload the page's
+        /// JS renders.
+        /// </summary>
         private static string BuildSummaryJson(NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher)
         {
             var snapshot = network.GetSnapshot();
@@ -116,11 +106,6 @@ namespace BitcoinNetworkSimulator
             return JsonSerializer.Serialize(summary, JsonOptions);
         }
 
-        // The page's JS reads camelCase fields (s.participantCount, n.hashPower,
-        // ...) — this is the one serialization call that needs to match, unlike
-        // every other JSON endpoint in this codebase (Node.cs's /chain,
-        // /balances, ...), which are consumed by C#'s own JsonSerializerOptions
-        // { PropertyNameCaseInsensitive = true } on the read side instead.
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase

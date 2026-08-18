@@ -5,20 +5,16 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // The single, real HTTP listener shared by every node in the simulated
-    // network — one OS-level port instead of one per node. A request's
-    // destination node is the first path segment (e.g.
-    // http://localhost:5000/000-alpha/chain addresses node "000-alpha"'s
-    // /chain endpoint); NetworkServer resolves that segment to a live Node
-    // via `resolveNode` (backed by NodeNetwork's registry) and hands the
-    // remaining route to that node's own HandleRequestAsync (see Node.cs) —
-    // so Node owns everything about what a request DOES, not how it
-    // physically arrives. Incoming requests are handed to a bounded
-    // ElasticTaskPool rather than an unbounded Task.Run each, so the number
-    // of concurrent request handlers stays capped under load.
-    // ------------------------------------------------------------------
-
+    /// <summary>
+    /// The single, real HTTP listener shared by every node in the simulated network — one
+    /// OS-level port instead of one per node. A request's destination node is the first path
+    /// segment (e.g. <c>http://localhost:5000/000-alpha/chain</c> addresses node
+    /// "000-alpha"'s <c>/chain</c> endpoint); resolves that segment to a live
+    /// <see cref="Node"/> and hands the remaining route to its own
+    /// <see cref="Node.HandleRequestAsync"/>. Incoming requests are handed to a bounded
+    /// <see cref="ElasticTaskPool"/> rather than an unbounded <c>Task.Run</c> each, so the
+    /// number of concurrent request handlers stays capped under load.
+    /// </summary>
     public class NetworkServer
     {
         private readonly int _port;
@@ -28,12 +24,13 @@ namespace BitcoinNetworkSimulator
         private readonly ElasticTaskPool _requestPool;
         private volatile bool _running = true;
 
-        // dashboardHandler, when given, intercepts every request whose first
-        // path segment is "dashboard" — reserved out of node-id space since a
-        // real node id is always NodeNetwork.NodeNameFor's zero-padded-index
-        // + Greek-letter shape (e.g. "000-alpha"), never this literal word —
-        // instead of routing it through resolveNode like an ordinary node
-        // request. See Dashboard.cs and the "Watching a run" note in README.md.
+        /// <summary>
+        /// <paramref name="dashboardHandler"/>, when given, intercepts every request whose
+        /// first path segment is "dashboard" — reserved out of node-id space, since a real
+        /// node id is always <see cref="NodeNetwork.NodeNameFor"/>'s zero-padded-index +
+        /// Greek-letter shape (e.g. "000-alpha") — instead of routing it through
+        /// <paramref name="resolveNode"/> like an ordinary node request.
+        /// </summary>
         public NetworkServer(int port, Func<string, Node?> resolveNode, Func<HttpListenerContext, string, Task>? dashboardHandler = null)
         {
             _port = port;
@@ -55,7 +52,7 @@ namespace BitcoinNetworkSimulator
         {
             _running = false;
             _requestPool.Stop();
-            try { _listener.Stop(); } catch { /* ignore on shutdown */ }
+            try { _listener.Stop(); } catch { }
         }
 
         private async Task ListenLoop()
@@ -76,11 +73,12 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Splits "/000-alpha/chain" into node id "000-alpha" and the
-        // remaining route "/chain" (defaulting to "/" when nothing follows
-        // the node id, e.g. a bare "/000-alpha"). A missing or unrecognized
-        // node id is rejected here, before Node.HandleRequestAsync ever sees
-        // the request.
+        /// <summary>
+        /// Splits "/000-alpha/chain" into node id "000-alpha" and the remaining route
+        /// "/chain" (defaulting to "/" when nothing follows the node id). A missing or
+        /// unrecognized node id is rejected here, before <see cref="Node.HandleRequestAsync"/>
+        /// ever sees the request.
+        /// </summary>
         private async Task DispatchAsync(HttpListenerContext ctx)
         {
             try

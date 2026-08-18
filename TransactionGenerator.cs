@@ -9,16 +9,12 @@ using System.Threading.Tasks;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Synthetic transaction traffic generator. Sends from real node IDs
-    // (alpha, beta, ...) rather than made-up user names, because only node
-    // IDs ever actually receive coins (the coinbase reward is paid to
-    // whoever built the block) — with balance enforcement in place, a
-    // fictional account that never earns anything could never legally send
-    // anything either. Balances are recomputed from a live /chain snapshot
-    // each round (never trusted from a cache), and a sender never gets
-    // asked to send more than they currently have.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// Synthetic transaction traffic generator. Sends from real node IDs rather than
+    /// made-up user names, since only node IDs ever actually receive coins. Balances are
+    /// recomputed from a live <c>/chain</c> snapshot each round, and a sender never gets
+    /// asked to send more than they currently have.
+    /// </summary>
     public static class TransactionGenerator
     {
         private static readonly Random Rng = new();

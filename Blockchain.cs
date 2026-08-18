@@ -9,10 +9,6 @@ using Microsoft.Data.Sqlite;
 
 namespace BitcoinNetworkSimulator
 {
-    // ------------------------------------------------------------------
-    // Data model
-    // ------------------------------------------------------------------
-
     public class Transaction
     {
         public string From { get; set; } = "";
@@ -21,6 +17,14 @@ namespace BitcoinNetworkSimulator
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 
+    /// <summary>
+    /// One block in a node's chain, including its proof-of-work fields, the builder's
+    /// signature over its hash, and the consensus/economics ruleset its builder recorded
+    /// using. <see cref="Signature"/> is excluded from <see cref="ComputeHash"/>'s payload
+    /// since it is computed from the hash itself. <see cref="Rules"/> is informational only:
+    /// a validating peer checks a block against its own <see cref="RuleSchedule"/> for that
+    /// height, never against this field.
+    /// </summary>
     public class Block
     {
         public int Index { get; set; }
@@ -28,41 +32,10 @@ namespace BitcoinNetworkSimulator
         public List<Transaction> Transactions { get; set; } = new();
         public string PreviousHash { get; set; } = "";
         public string Hash { get; set; } = "";
-        // The node that "won" the race and built this block.
         public string BuiltBy { get; set; } = "";
-
-        // ECDSA signature over this block's Hash, produced with BuiltBy's own
-        // private signing key — see NodeIdentityRegistry and the "Signed
-        // blocks" note in README.md. Deliberately excluded from ComputeHash's
-        // payload (it's computed FROM the hash, so including it would be
-        // circular); a node can still put any name it likes in BuiltBy, but
-        // it can only produce a Signature that verifies against the key
-        // actually registered for that name if it genuinely holds that
-        // name's private key.
         public string Signature { get; set; } = "";
-
-        // Proof-of-work fields. Target is the PUBLIC 256-bit ceiling this block's
-        // hash must be less than or equal to — carried right in the header, so any
-        // peer can check it without asking anyone. Nonce is the value a miner
-        // searched over to find a hash meeting that target. Both are part of the
-        // hashed payload below, so tampering with either after the fact breaks the
-        // hash-integrity check during validation.
         public string Target { get; set; } = "";
         public long Nonce { get; set; }
-
-        // The consensus/economics ruleset this block's builder recorded
-        // using — see ConsensusRules' own comment for the full picture.
-        // INFORMATIONAL ONLY, not authoritative: a peer validating this
-        // block does NOT trust this field — it independently looks up its
-        // OWN RuleSchedule for this block's height and checks Target/reward
-        // against that instead (see ValidateChain's `rulesForHeight`
-        // parameter). This is here for introspection/logging/persistence
-        // (so a researcher — or ChainWatcher.ValidateSnapshot's neutral,
-        // no-node-context audit — can see what a builder believed it was
-        // following), and is still part of the hashed payload below so it
-        // can't be silently rewritten after the fact, but two nodes with
-        // matching RuleSchedules stay in consensus regardless of what this
-        // field says.
         public ConsensusRules Rules { get; set; } = new();
 
         public string ComputeHash()
@@ -77,46 +50,17 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // Proof-of-work math: target encoding, hash-vs-target comparison, and the
-    // deterministic retarget rule every node uses to independently compute what
-    // a block's target SHOULD be, purely from public chain history. Nobody
-    // announces or holds this as a secret — it's a pure function of data every
-    // node already has.
-    // ------------------------------------------------------------------
-
+    /// <summary>
+    /// Proof-of-work math: target encoding, hash-vs-target comparison, and the deterministic
+    /// retarget rule every node uses to independently compute what a block's target should be,
+    /// purely from public chain history.
+    /// </summary>
     public static class ProofOfWork
     {
-        // Real Bitcoin's own numbers (2016-block / ~2-week retarget window,
-        // 10-minute block target) — the built-in defaults a ConsensusRules
-        // gets when nothing overrides them (see ConsensusRules below and
-        // ScenarioNodeGroup.Rules in Scenario.cs).
         public const int DefaultRetargetIntervalBlocks = 2016;
         public const double DefaultTargetSecondsPerBlock = 600.0;
-
-        // Bitcoin-style clamp so a single retarget can't swing wildly in
-        // either direction, even if the last interval's timing was a fluke —
-        // already real Bitcoin's own clamp.
         public const double DefaultMinAdjustmentFactor = 0.25;
         public const double DefaultMaxAdjustmentFactor = 4.0;
-
-        // Higher = harder (lower per-attempt success probability, slower
-        // blocks). Lower = easier. Deliberately NOT matched to real Bitcoin's
-        // actual difficulty — real difficulty would make a block practically
-        // unmineable here, since MineBlock only gets a bounded number of
-        // attempts per turn (a node's HashPower — see the "Mining" note in
-        // README.md) rather than the unbounded, massively-parallel search a
-        // real miner performs. At the default shift 8, a single attempt
-        // succeeds with probability 1/256, so a regular (HashPower 1) node
-        // still has a real, if modest, chance each turn, while a node with
-        // HashPower 1000 succeeds on the vast majority of its turns — exactly
-        // the "1000x more likely to win" effect simulated hash power is meant
-        // to produce. Raising it combined with real
-        // RetargetIntervalBlocks/TargetSecondsPerBlock is itself a
-        // network-effect worth observing: retargeting on Bitcoin's real
-        // cadence against hash power that isn't Bitcoin's real magnitude
-        // pushes difficulty to keep climbing every interval, since blocks
-        // keep arriving faster than the 10-minute goal expects.
         public const int DefaultInitialDifficultyShift = 8;
 
         public static readonly BigInteger MaxTarget = (BigInteger.One << 256) - 1;
@@ -148,27 +92,10 @@ namespace BitcoinNetworkSimulator
             return HashToBigInteger(hashHex) <= HashToBigInteger(targetHex);
         }
 
-        // Deterministically derives the target the NEXT block (at height =
-        // ancestors.Count) must satisfy, purely from public chain history and
-        // `rules` — no secret, nothing to trust, nothing to announce. `rules`
-        // is the CANDIDATE block's own declared ConsensusRules (see the note
-        // atop that class for why this is a per-block value, not a global
-        // one): mining computes this using its own node's rules before
-        // stamping them onto the block it builds, and ValidateChain
-        // recomputes the identical thing using block.Rules — checking that a
-        // block correctly followed the rules IT claims to follow, the same
-        // way every real Bitcoin node independently recomputes the same
-        // expected difficulty from block timestamps under one shared,
-        // network-wide rule.
-        //
-        // Known quirk, left in deliberately rather than engineered around:
-        // genesis has a fixed, hardcoded timestamp (see CreateGenesisBlock), so
-        // the very FIRST retarget interval spans from that fixed point to
-        // whenever the run actually started — a huge apparent elapsed time.
-        // That first retarget will almost always saturate the
-        // MaxAdjustmentFactor clamp (target gets 4x easier). Every retarget
-        // after that behaves normally, based purely on real elapsed mining
-        // time between real blocks.
+        /// <summary>
+        /// Deterministically derives the target the next block (at height = ancestors.Count)
+        /// must satisfy, purely from public chain history and <paramref name="rules"/>.
+        /// </summary>
         public static string ComputeExpectedTargetHex(List<Block> ancestors, ConsensusRules rules)
         {
             if (ancestors == null || ancestors.Count == 0)
@@ -178,7 +105,7 @@ namespace BitcoinNetworkSimulator
             var parent = ancestors[^1];
 
             if (nextHeight < rules.RetargetIntervalBlocks || nextHeight % rules.RetargetIntervalBlocks != 0)
-                return parent.Target; // no adjustment due yet — inherit parent's target
+                return parent.Target;
 
             var intervalStart = ancestors[nextHeight - rules.RetargetIntervalBlocks];
             var actualSeconds = Math.Max(1.0, (parent.Timestamp - intervalStart.Timestamp).TotalSeconds);
@@ -195,19 +122,10 @@ namespace BitcoinNetworkSimulator
             return TargetToHex(scaled);
         }
 
-        // Probability of winning at least one of `hashPower` independent nonce
-        // attempts against a ruleset whose difficulty is `initialDifficultyShift`
-        // — per-attempt success probability at shift `s` is target/MaxTarget =
-        // (MaxTarget >> s)/MaxTarget ~= 2^-s (see ComputeExpectedTargetHex's
-        // ancestors==null branch; the truncation from MaxTarget's own -1 is
-        // negligible past 200+ bits of precision). Used by RuleSchedule's
-        // value-seeking mode to weigh a candidate's raw reward x price by how
-        // likely THIS node actually is to win it, not just what it pays if won —
-        // see "ValueSeeking" in README.md. Uses each candidate's PRE-RETARGET
-        // (genesis) difficulty as an ancestor-free proxy, the same simplification
-        // Economics.NominalBlockReward already makes for reward: a candidate
-        // ruleset the node isn't currently mining has no real retargeted chain
-        // history to derive an actual current target from.
+        /// <summary>
+        /// Probability of winning at least one of <paramref name="hashPower"/> independent
+        /// nonce attempts against a ruleset whose difficulty is <paramref name="initialDifficultyShift"/>.
+        /// </summary>
         public static double WinProbability(int hashPower, int initialDifficultyShift)
         {
             var perAttempt = Math.Pow(2.0, -initialDifficultyShift);
@@ -215,24 +133,11 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // One consensus/economics ruleset — see "Scenarios" in README.md's
-    // NodeGroup.RuleSchedule and "What this is not" for the full picture.
-    // Every node owns a RuleSchedule (below), not a single fixed
-    // ConsensusRules: which one is "currently active" can change at a
-    // given block height, e.g. real-bitcoin rules for heights 0-5, then a
-    // different named ruleset from height 6 on. A mining node looks up its
-    // OWN schedule for the height it's building and uses that to compute
-    // the block's target/reward; a validating node does the SAME lookup
-    // against ITS OWN schedule when checking an incoming block — see
-    // ValidateChain's `rulesForHeight` parameter. "Consensus" is exactly
-    // that: nodes whose schedules agree at a given height independently
-    // arrive at the same expected target/reward and stay on the same
-    // chain; nodes whose schedules disagree at a height (one switches,
-    // another doesn't, or they switch to different rulesets) independently
-    // arrive at DIFFERENT expected values and diverge — a real,
-    // simulated hard fork, not a bug.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// One consensus/economics ruleset. A node's active ruleset can change by block height —
+    /// see <see cref="RuleSchedule"/>, which every node owns instead of a single fixed
+    /// <see cref="ConsensusRules"/>.
+    /// </summary>
     public class ConsensusRules
     {
         public int RetargetIntervalBlocks { get; set; } = ProofOfWork.DefaultRetargetIntervalBlocks;
@@ -245,72 +150,48 @@ namespace BitcoinNetworkSimulator
         public decimal MaxSupply { get; set; } = Economics.DefaultMaxSupply;
     }
 
-    // One entry in a node's RuleSchedule: `Rules` becomes the active
-    // ruleset starting at height `FromHeight`, until (if ever) a
-    // later-FromHeight entry supersedes it.
+    /// <summary>
+    /// One entry in a node's <see cref="RuleSchedule"/>: <see cref="Rules"/> becomes the
+    /// active ruleset starting at height <see cref="FromHeight"/>, until (if ever) a
+    /// later-<see cref="FromHeight"/> entry supersedes it.
+    /// </summary>
     public class RuleScheduleEntry
     {
         public int FromHeight { get; set; } = 0;
         public ConsensusRules Rules { get; set; } = new();
     }
 
-    // One entry in a NamedConsensusRules' PriceSchedule (Scenario.cs): Price
-    // becomes that ruleset's $-reference value starting at height FromHeight,
-    // until (if ever) a later-FromHeight entry supersedes it — same
-    // {FromHeight, value} shape as RuleScheduleEntry above. Consulted only by
-    // RuleSchedule's value-seeking mode when comparing candidate rulesets'
-    // live profitability; never resolved against anything by name, so —
-    // unlike RuleScheduleEntry — there's no separate Scenario-vs-resolved
-    // split needed: this one type is both the YAML shape and the runtime shape.
+    /// <summary>
+    /// One entry in a <see cref="NamedConsensusRules"/>' price schedule: <see cref="Price"/>
+    /// becomes that ruleset's $-reference value starting at height <see cref="FromHeight"/>,
+    /// until (if ever) a later-<see cref="FromHeight"/> entry supersedes it.
+    /// </summary>
     public class PriceScheduleEntry
     {
         public int FromHeight { get; set; } = 0;
         public decimal Price { get; set; } = 0m;
     }
 
-    // One candidate ruleset a ValueSeeking node compares against its peers —
-    // see RuleSchedule's value-seeking constructor below. Rules and
-    // PriceSchedule are copied out of whichever NamedConsensusRules entry
-    // ScenarioNodeGroup.ValueSeekingCandidates named, at scenario-load
-    // resolution time (ScenarioLoader.ResolveNodeRules) — same "resolved,
-    // name-free" philosophy as RuleScheduleEntry.Rules, so a node's own
-    // candidate set never needs to re-resolve names against a scenario file
-    // again after the run that created it.
+    /// <summary>
+    /// One candidate ruleset a value-seeking node compares against its peers — see
+    /// <see cref="RuleSchedule"/>'s value-seeking constructor.
+    /// </summary>
     public class ValueSeekingCandidate
     {
         public ConsensusRules Rules { get; set; } = new();
         public List<PriceScheduleEntry> PriceSchedule { get; set; } = new();
     }
 
-    // ------------------------------------------------------------------
-    // A node's own timeline of which ConsensusRules is active at which
-    // height — see ConsensusRules' own comment for why this, not a single
-    // fixed ruleset, is what each node actually owns. Sourced from
-    // NodeMetadata.RuleSchedule (itself resolved from whichever
-    // ScenarioNodeGroup created the node — see ScenarioNodeGroup.RuleSchedule
-    // in Scenario.cs), and shared by both this node's Blockchain (for
-    // validating incoming blocks) and its SoloMiner (for building its own).
-    //
-    // Has a second mode — see the value-seeking constructor below — but
-    // RulesForHeight's public signature is identical either way, so nothing
-    // that already calls it (ValidateChain's rulesForHeight delegate,
-    // TryAppend/TryReplaceWithLongerChain/TryLoadFrom, SoloMiner's own
-    // mining loop) needs to know or care which mode a given instance is in.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// A node's own timeline of which <see cref="ConsensusRules"/> is active at which height.
+    /// Either a static, author-scripted timeline or, in value-seeking mode, a dynamic pick of
+    /// whichever candidate has the highest expected value at a given height.
+    /// </summary>
     public class RuleSchedule
     {
-        private readonly List<RuleScheduleEntry> _entries; // static mode; empty in value-seeking mode
-        private readonly List<ValueSeekingCandidate> _valueSeekingCandidates; // value-seeking mode; empty in static mode
-        private readonly int _hashPower; // value-seeking mode only; unused in static mode
-        // Whole-run, file-wide $ debasement rate per block — see
-        // ScenarioFile.DebasementRatePerBlock and "Debasement" in
-        // README.md. Deliberately the SAME value on every node's
-        // RuleSchedule regardless of mode or candidate set: a ValueSeeking
-        // node's cross-ruleset $ comparison only makes sense if every
-        // candidate (and every other node) shares one currency, so this
-        // can't vary per-node or per-ruleset the way PriceSchedule itself
-        // does. 0 (default) disables it entirely — DebasementFactorAt
-        // always returns 1.
+        private readonly List<RuleScheduleEntry> _entries;
+        private readonly List<ValueSeekingCandidate> _valueSeekingCandidates;
+        private readonly int _hashPower;
         private readonly decimal _debasementRatePerBlock;
 
         public RuleSchedule(IEnumerable<RuleScheduleEntry> entries, decimal debasementRatePerBlock)
@@ -320,19 +201,6 @@ namespace BitcoinNetworkSimulator
             _debasementRatePerBlock = debasementRatePerBlock;
         }
 
-        // Value-seeking mode: instead of one author-scripted timeline, RulesForHeight
-        // dynamically picks whichever candidate has the highest EXPECTED value at that
-        // height — ProofOfWork.WinProbability(hashPower, candidate.Rules.InitialDifficultyShift)
-        // x NominalBlockReward(height, candidate.Rules) x price-at-height(candidate.PriceSchedule).
-        // Folding in win probability means a candidate that pays more nominally isn't
-        // automatically the best pick if it's also much harder to actually win — and
-        // since WinProbability depends on THIS node's own hashPower, two value-seeking
-        // nodes with different hash power can rationally reach OPPOSITE conclusions from
-        // the exact same public price/reward/difficulty data — see "ValueSeeking" in
-        // README.md. Still fully public and deterministic per node (nothing here is
-        // random or hidden), so any two nodes that share both a candidate set AND a
-        // hashPower still always agree, the same way ProofOfWork/Economics' own
-        // recomputed-not-trusted values do.
         public RuleSchedule(IEnumerable<ValueSeekingCandidate> candidates, int hashPower, decimal debasementRatePerBlock)
         {
             _entries = new List<RuleScheduleEntry>();
@@ -343,11 +211,10 @@ namespace BitcoinNetworkSimulator
             _debasementRatePerBlock = debasementRatePerBlock;
         }
 
-        // The ruleset active at `height`: the entry with the highest
-        // FromHeight that is still <= height. An empty schedule, or a
-        // height before every entry's FromHeight, resolves to
-        // `new ConsensusRules()` (real Bitcoin's own numbers) — the same
-        // fallback a NodeGroup with no RuleSchedule/RulesName at all gets.
+        /// <summary>
+        /// The ruleset active at <paramref name="height"/>. An empty schedule, or a height
+        /// before every entry's <c>FromHeight</c>, resolves to <c>new ConsensusRules()</c>.
+        /// </summary>
         public ConsensusRules RulesForHeight(int height)
         {
             if (_valueSeekingCandidates.Count > 0)
@@ -362,52 +229,32 @@ namespace BitcoinNetworkSimulator
             return active;
         }
 
-        // The best candidate's expected value (win probability x reward x price) at
-        // `height` — decimal.MaxValue in static mode, so a cost comparison against
-        // it never triggers (a scripted/static schedule isn't a profitability
-        // decision to begin with, so there's nothing for a mining cost to
-        // override). Used by SoloMiner to decide whether ANY candidate clears its
-        // own mining cost this turn — see "Mining costs" in README.md.
+        /// <summary>
+        /// The best candidate's expected value (win probability x reward x price) at
+        /// <paramref name="height"/>, or <see cref="decimal.MaxValue"/> in static mode.
+        /// </summary>
         public decimal BestValueAt(int height) =>
             _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Value : decimal.MaxValue;
 
-        // Whether this schedule is in value-seeking mode — used by SoloMiner to
-        // gate cost-of-living tracking, which only makes sense for a node with
-        // PriceSchedule data to value its own balance against.
         public bool IsValueSeeking => _valueSeekingCandidates.Count > 0;
 
-        // How much a $ figure authored at height 0 is worth, NOMINALLY, at
-        // `height` — 1 (no change) when DebasementRatePerBlock is 0. See
-        // "Debasement" in README.md. Applied once, here, to every
-        // PriceSchedule lookup below (BestCandidateAt) so CurrentPriceAt/
-        // BestValueAt already return nominal, debased $ figures; SoloMiner
-        // applies it separately to its own CostPerAttempt/CostOfLiving/
-        // HashPowerCost at their point of use, since those aren't PriceSchedule
-        // lookups and don't flow through here.
+        /// <summary>
+        /// How much a $ figure authored at height 0 is worth, nominally, at
+        /// <paramref name="height"/> — 1 (no change) when the debasement rate is 0.
+        /// </summary>
         public decimal DebasementFactorAt(int height) =>
             (decimal)Math.Pow((double)(1m + _debasementRatePerBlock), height);
 
-        // The price of whichever candidate is currently most profitable — 0m in
-        // static mode (no PriceSchedule concept to draw from). Used by SoloMiner
-        // to value its own on-chain balance in $ terms for the cost-of-living
-        // solvency check — see "Cost of living" in README.md.
+        /// <summary>The price of whichever candidate is currently most profitable, or 0m in static mode.</summary>
         public decimal CurrentPriceAt(int height) =>
             _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Price : 0m;
 
-        // Picks whichever candidate's expected value (win probability x
-        // NominalBlockReward x price-at-height) is highest; first-in-list wins an
-        // exact tie (deterministic, same list order on every node). Falls back to
-        // `new ConsensusRules()` — same fallback an empty static schedule gets —
-        // when every candidate is worth exactly $0 (e.g. no PriceSchedule entry
-        // has activated yet).
         private ConsensusRules MostProfitableAt(int height)
         {
             var (best, value, _) = BestCandidateAt(height);
             return (best != null && value > 0m) ? best : new ConsensusRules();
         }
 
-        // Shared by MostProfitableAt, BestValueAt, and CurrentPriceAt so all
-        // three only ever walk _valueSeekingCandidates once, from one place.
         private (ConsensusRules? Rules, decimal Value, decimal Price) BestCandidateAt(int height)
         {
             ConsensusRules? best = null;
@@ -441,28 +288,12 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // Coin issuance: a coinbase transaction (From == CoinbaseSender) is how new
-    // coins enter existence, exactly one per block, paid to whoever built it.
-    // The nominal reward halves every HalvingIntervalBlocks, and the running
-    // total ever minted across the whole chain is hard-capped at MaxSupply —
-    // both computed the same deterministic way ProofOfWork.ComputeExpectedTargetHex
-    // computes its target: purely from public chain history plus a
-    // ConsensusRules (see that class's comment for why this is a per-block
-    // value passed in, not a global one every node shares).
-    //
-    // ARITHMETIC NOTE, worth being upfront about: the Default* constants
-    // below (ConsensusRules' own defaults) are real Bitcoin's own constants,
-    // tuned so the reward series converges to exactly MaxSupply:
-    // HalvingIntervalBlocks * InitialBlockReward * (1 + 1/2 + 1/4 + ...) =
-    // 210,000 * 50 * 2 = 21,000,000 — so the cap actually binds
-    // (asymptotically) at these defaults, not just in theory. A
-    // ScenarioNodeGroup can override all three (see "Scenarios" in
-    // README.md) for a faster-paced run — e.g. halving every 210 blocks
-    // instead of 210,000 reaches the same-shaped reward curve 1000x sooner,
-    // but then the series only converges to 210 * 50 * 2 = 21,000, so
-    // MaxSupply would need shrinking to match if you want the cap to
-    // actually bind again.
+    /// <summary>
+    /// Coin issuance: a coinbase transaction (<c>From == CoinbaseSender</c>) is how new coins
+    /// enter existence, exactly one per block, paid to whoever built it. The nominal reward
+    /// halves every <see cref="ConsensusRules.HalvingIntervalBlocks"/>, and the running total
+    /// ever minted across the whole chain is hard-capped at <see cref="ConsensusRules.MaxSupply"/>.
+    /// </summary>
     public static class Economics
     {
         public const string CoinbaseSender = "coinbase";
@@ -470,22 +301,19 @@ namespace BitcoinNetworkSimulator
         public const int DefaultHalvingIntervalBlocks = 210_000;
         public const decimal DefaultMaxSupply = 21_000_000m;
 
-        // Schedule-only reward for a given height, ignoring the max-supply cap.
+        /// <summary>Schedule-only reward for a given height, ignoring the max-supply cap.</summary>
         public static decimal NominalBlockReward(int height, ConsensusRules rules)
         {
-            if (height <= 0) return 0m; // genesis pays no reward
+            if (height <= 0) return 0m;
 
             var halvings = height / rules.HalvingIntervalBlocks;
-            if (halvings >= 50) return 0m; // decayed to zero long before this many halvings
+            if (halvings >= 50) return 0m;
 
             var divisor = BigInteger.Pow(2, halvings);
             return rules.InitialBlockReward / (decimal)divisor;
         }
 
-        // Sums every coinbase-labeled transaction across the given chain prefix —
-        // i.e. everything ever minted so far, purely from public chain data.
-        // Rule-agnostic: this is a plain fact about the chain's contents, not
-        // something a ConsensusRules affects.
+        /// <summary>Sums every coinbase-labeled transaction across the given chain prefix.</summary>
         public static decimal TotalMintedSoFar(List<Block> ancestors)
         {
             decimal total = 0m;
@@ -496,11 +324,11 @@ namespace BitcoinNetworkSimulator
             return total;
         }
 
-        // The actual reward a block at this height may claim: the schedule's
-        // nominal reward, clamped so the running total minted across the whole
-        // chain never exceeds `rules.MaxSupply` — that candidate block's own
-        // declared cap, checked against the chain's actual (rule-agnostic)
-        // minted-so-far total.
+        /// <summary>
+        /// The actual reward a block at this height may claim: the schedule's nominal reward,
+        /// clamped so the running total minted across the whole chain never exceeds
+        /// <paramref name="rules"/>'s <see cref="ConsensusRules.MaxSupply"/>.
+        /// </summary>
         public static decimal ComputeBlockReward(List<Block> ancestors, int height, ConsensusRules rules)
         {
             var nominal = NominalBlockReward(height, rules);
@@ -514,14 +342,7 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // Balance tracking: derives every account's current balance purely from
-    // public chain history, exactly the same "recompute it yourself, don't
-    // trust a claim" pattern ProofOfWork and Economics use above. This is
-    // what lets ValidateChain (and a miner's own mempool selection) catch a
-    // sender trying to spend coins they don't have, or spend the same coins
-    // twice.
-    // ------------------------------------------------------------------
+    /// <summary>Derives every account's current balance purely from public chain history.</summary>
     public static class Ledger
     {
         public static Dictionary<string, decimal> ComputeBalances(IEnumerable<Block> chain)
@@ -543,15 +364,11 @@ namespace BitcoinNetworkSimulator
             ComputeBalances(chain).GetValueOrDefault(account);
     }
 
-    // Thread-safe append-only chain. Each "node" below keeps its OWN copy of
-    // a Blockchain to simulate a real distributed system where nodes can
-    // (and, in this naive design, do) disagree — including, now, about
-    // WHAT COUNTS as valid: `_ruleSchedule` is this node's own timeline of
-    // active ConsensusRules (see RuleSchedule's comment), consulted by
-    // every real peer-consensus check below (TryAppend,
-    // TryReplaceWithLongerChain, TryLoadFrom) so a block is only ever
-    // accepted here if it matches what THIS node currently expects at that
-    // height.
+    /// <summary>
+    /// One node's own thread-safe, append-only chain, validated against its own
+    /// <see cref="RuleSchedule"/> so it only ever accepts a block that matches what this node
+    /// currently expects at that height.
+    /// </summary>
     public class Blockchain
     {
         private readonly object _lock = new();
@@ -564,19 +381,6 @@ namespace BitcoinNetworkSimulator
             Blocks.Add(CreateGenesisBlock());
         }
 
-        // Genesis must be byte-for-byte identical across every node, or their chains
-        // can never agree on a shared "block #0" and every subsequent block gets
-        // rejected everywhere except on the node that built it. That means NO
-        // DateTime.UtcNow here — timestamps captured milliseconds apart on
-        // different nodes would hash differently and break consensus before it
-        // even starts. Genesis is exempt from proof-of-work (it's the fixed,
-        // universally-agreed starting point every node is hardcoded to trust, the
-        // same way real Bitcoin's genesis block is a checkpoint, not something
-        // your own node re-verifies by mining) — including a fixed, default
-        // ConsensusRules (Block.Rules' own default), regardless of whatever
-        // rules the node creating it happens to be configured with. See
-        // ConsensusRules' comment for why every OTHER block instead carries
-        // its own builder-declared rules.
         private static Block CreateGenesisBlock()
         {
             var genesis = new Block
@@ -599,8 +403,7 @@ namespace BitcoinNetworkSimulator
             get { lock (_lock) { return Blocks[^1]; } }
         }
 
-        // Used only for the local build path (a node building its own block never
-        // needs to "validate" itself — it just appends what it made).
+        /// <summary>Appends a block this node built itself, without re-validating it.</summary>
         public void AppendTrusting(Block block)
         {
             lock (_lock)
@@ -609,42 +412,6 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Validates an incoming chain block-by-block. What this DOES catch:
-        //   - structural corruption / tampering (recomputed hash must match claimed hash)
-        //   - wrong parent (PreviousHash must match the previous block's hash)
-        //   - wrong height (Index must be sequential)
-        //   - malformed transactions (basic sanity checks)
-        //   - insufficient proof-of-work: the declared Target must match what's
-        //     independently recomputed from prior block timestamps (nobody gets
-        //     to just claim an easy target), AND the block's hash must actually
-        //     satisfy that target
-        //   - incorrect coinbase reward: at most one coinbase-labeled transaction
-        //     per block, and its amount must exactly match what every node
-        //     independently computes as the correct reward for that height,
-        //     respecting both the halving schedule and the max-supply cap
-        //   - insufficient balance / double-spends: every non-coinbase transaction
-        //     is checked against a running balance derived purely from chain
-        //     history up to that exact point (see Ledger.ComputeBalances) — a
-        //     sender can never spend more than they actually have, and a second
-        //     spend of the same coins finds the balance already gone
-        //   - a node lying about who built it: BuiltBy must have a registered
-        //     signing key (see NodeIdentityRegistry) and the block's Signature
-        //     must actually verify against that key — see the "Signed
-        //     blocks" note in README.md
-        // Being selected to build a block genuinely costs something real:
-        // computational search work.
-        //
-        // `rulesForHeight` decides which ConsensusRules each block's
-        // target/reward gets checked against — this is what makes "consensus"
-        // actually mean something (see ConsensusRules' comment): the three
-        // real peer-to-peer callers (TryAppend, TryReplaceWithLongerChain,
-        // TryLoadFrom) pass `this` node's OWN RuleSchedule.RulesForHeight, so
-        // a block is only accepted if it matches what the VALIDATING node
-        // itself currently expects at that height — not whatever the block's
-        // own Rules field happens to claim. ValidateSnapshot (the neutral,
-        // no-node-context watcher audit) is the one exception, passing each
-        // block's own self-declared Rules instead, since it has no "own"
-        // schedule to check against.
         private static (bool Ok, string Reason) ValidateChain(List<Block> candidate, Func<int, ConsensusRules> rulesForHeight)
         {
             if (candidate == null || candidate.Count == 0)
@@ -653,10 +420,6 @@ namespace BitcoinNetworkSimulator
             if (candidate[0].Index != 0)
                 return (false, "candidate chain does not start at genesis");
 
-            // Running balance derived purely from chain history as we walk
-            // forward — this is what lets the per-transaction check below catch
-            // both an outright insufficient-balance spend and a double-spend
-            // (the second attempt simply finds the balance already gone).
             var balances = new Dictionary<string, decimal>();
 
             for (int i = 0; i < candidate.Count; i++)
@@ -680,13 +443,8 @@ namespace BitcoinNetworkSimulator
                     if (block.PreviousHash != previous.Hash)
                         return (false, $"block #{block.Index} has previous-hash mismatch");
 
-                    var ancestors = candidate.GetRange(0, i); // blocks 0..i-1, i.e. up through parent
+                    var ancestors = candidate.GetRange(0, i);
 
-                    // Every check below validates block against the rules
-                    // ACTIVE FOR THE VALIDATOR at this height (rulesForHeight),
-                    // not whatever the block itself claims — see
-                    // ConsensusRules' comment and ValidateChain's own comment
-                    // above for why.
                     var rules = rulesForHeight(block.Index);
                     var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
                     if (block.Target != expectedTarget)
@@ -753,27 +511,21 @@ namespace BitcoinNetworkSimulator
             return (true, "ok");
         }
 
-        // Neutral, no-node-context structural audit (see ChainWatcher) — has
-        // no "own" RuleSchedule to check against, so it validates each block
-        // against its own self-declared Rules instead (self-consistency,
-        // not real peer consensus — see ValidateChain's own comment).
+        /// <summary>
+        /// Neutral, no-node-context structural audit: validates each block against its own
+        /// self-declared <see cref="Block.Rules"/> rather than any one node's active schedule.
+        /// </summary>
         public static (bool Ok, string Reason) ValidateSnapshot(List<Block> candidate)
         {
             return ValidateChain(candidate, height => candidate[height].Rules);
         }
 
-        // `AttributableToSender` distinguishes a rejection reason that reflects
-        // an actual consensus-rule violation in the data itself (bad PoW, bad
-        // coinbase, bad signature, bad tx, wrong genesis — anything ValidateChain
-        // catches) from one that's just normal network timing (we're already
-        // past this index, this doesn't build on our current tip, the candidate
-        // isn't longer than what we have). A validating peer should never have
-        // relayed something that fails the former without having caught it
-        // itself first, so — mirroring real Bitcoin Core's discouragement
-        // filter, which acts on the first genuine consensus violation rather
-        // than accumulating a numeric ban score — only the former is grounds
-        // for a caller to discourage whoever sent it. See the "Peer
-        // discouragement" note in README.md.
+        /// <summary>
+        /// Attempts to append <paramref name="block"/> to the tip. <c>AttributableToSender</c>
+        /// is true only when rejection reflects a genuine consensus-rule violation in the data
+        /// itself, as opposed to ordinary network timing — the signal a caller should act on to
+        /// discourage whoever sent it.
+        /// </summary>
         public (bool Ok, string Reason, bool AttributableToSender) TryAppend(Block block)
         {
             lock (_lock)
@@ -796,13 +548,10 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Fork choice rule:
-        // A valid candidate chain (including every block's proof-of-work AND
-        // coinbase correctness) replaces our current chain only when it is
-        // strictly longer. This lets a node undo blocks it previously accepted
-        // when another branch proves to be the longer valid history.
-        //
-        // See TryAppend's comment above for what `AttributableToSender` means.
+        /// <summary>
+        /// Fork choice: a valid candidate chain replaces the current one only when it is
+        /// strictly longer.
+        /// </summary>
         public (bool Replaced, string Reason, bool AttributableToSender) TryReplaceWithLongerChain(List<Block> candidate)
         {
             lock (_lock)
@@ -822,10 +571,10 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Used once at startup to resume a node's chain from a previously persisted
-        // snapshot on disk. Accepts the saved chain only if it's structurally valid
-        // (including every block's proof-of-work and coinbase correctness) AND
-        // shares this build's canonical genesis block.
+        /// <summary>
+        /// Resumes this node's chain from a previously persisted snapshot on disk, accepting
+        /// it only if structurally valid and sharing this build's canonical genesis block.
+        /// </summary>
         public (bool Loaded, string Reason) TryLoadFrom(List<Block> candidate)
         {
             lock (_lock)
@@ -848,39 +597,14 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    // ------------------------------------------------------------------
-    // SQLite-backed persistence for one node's local chain. Each node gets
-    // its own blockchain.db under nodes/<node-id>/, with two tables:
-    //
-    //   blocks       - one row per block, PK'd by height (idx)
-    //   transactions - one row per transaction, FK'd to blocks(idx), with a
-    //                  position column preserving in-block order (order is
-    //                  part of Block.ComputeHash's payload, so it must
-    //                  round-trip exactly)
-    //
-    // Amount (and the decimal-typed ConsensusRules fields, InitialBlockReward/
-    // MaxSupply) are stored as TEXT (decimal.ToString(InvariantCulture)/
-    // decimal.Parse) rather than a numeric SQLite column, since SQLite has no
-    // native decimal type and REAL (double) would silently lose precision on
-    // a ledger. blocks also carries every other ConsensusRules field
-    // (int/double columns), since a block's Rules feeds its own hash — see
-    // ConsensusRules' comment — so resuming from disk must reconstruct the
-    // exact same Rules a block was originally mined with, or its hash would
-    // no longer recompute to match what's on disk.
-    //
-    // Sync() is append-only in the common case (new blocks land as INSERTs,
-    // nothing already on disk is touched) and, on a reorg, only replaces the
-    // records at and after the height where the new chain actually diverges
-    // from what's persisted — see its comment below.
-    // ------------------------------------------------------------------
+    /// <summary>
+    /// SQLite-backed persistence for one node's local chain, under
+    /// <c>nodes/&lt;node-id&gt;/blockchain.db</c>.
+    /// </summary>
     public sealed class BlockchainStore : IDisposable
     {
         private readonly object _lock = new();
         private readonly SqliteConnection _connection;
-
-        // Mirrors the hash persisted at each height (index == block height),
-        // kept in memory so Sync() can find a reorg's divergence point
-        // without re-reading the database on every call.
         private readonly List<string> _persistedHashes = new();
 
         public BlockchainStore(string dbPath)
@@ -937,8 +661,7 @@ namespace BitcoinNetworkSimulator
                 _persistedHashes.Add(reader.GetString(0));
         }
 
-        // Used once at startup to resume: returns the full saved chain in
-        // height order, or null if nothing has been persisted yet.
+        /// <summary>Returns the full saved chain in height order, or null if nothing has been persisted yet.</summary>
         public List<Block>? LoadAll()
         {
             lock (_lock)
@@ -1007,15 +730,11 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        // Reconciles the database with the given in-memory chain snapshot.
-        // Finds the first height (if any) where the snapshot's hash differs
-        // from what's already persisted there — everything below that height
-        // is untouched, since a block, once mined, never changes in place.
-        // The common case (blocks only ever appended) has no such height at
-        // all: this is a pure INSERT of the new tail. A reorg trims exactly
-        // the persisted records at and after the divergence point and
-        // reinserts the snapshot's replacement blocks from there on, rather
-        // than clearing and rewriting the whole table.
+        /// <summary>
+        /// Reconciles the database with the given in-memory chain snapshot: finds the first
+        /// height (if any) where the snapshot's hash differs from what's persisted, trims the
+        /// persisted records from that point on, then reinserts the snapshot's tail.
+        /// </summary>
         public void Sync(List<Block> snapshot)
         {
             lock (_lock)
@@ -1026,7 +745,7 @@ namespace BitcoinNetworkSimulator
                     divergeAt++;
 
                 if (divergeAt == _persistedHashes.Count && divergeAt == snapshot.Count)
-                    return; // nothing changed since the last sync
+                    return;
 
                 using var transaction = _connection.BeginTransaction();
 
