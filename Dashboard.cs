@@ -118,6 +118,14 @@ namespace BitcoinNetworkSimulator
                     NodeId = r.NodeId,
                     Reason = r.Reason
                 }).ToList(),
+                ChainGraph = (lastAudit?.ChainGraph ?? new List<ChainGraphBlock>()).Select(b => new DashboardChainBlock
+                {
+                    Hash = b.Hash,
+                    PreviousHash = b.PreviousHash,
+                    Height = b.Height,
+                    BuiltBy = b.BuiltBy,
+                    NodeIds = b.NodeIds
+                }).ToList(),
                 Scenario = BuildScenarioSummary(scenarioRuntime)
             };
 
@@ -200,6 +208,15 @@ namespace BitcoinNetworkSimulator
             public string Reason { get; init; } = "";
         }
 
+        private sealed class DashboardChainBlock
+        {
+            public string Hash { get; init; } = "";
+            public string PreviousHash { get; init; } = "";
+            public int Height { get; init; }
+            public string BuiltBy { get; init; } = "";
+            public List<string> NodeIds { get; init; } = new();
+        }
+
         private sealed class DashboardScenarioNodeGroup
         {
             public int Count { get; init; }
@@ -250,6 +267,7 @@ namespace BitcoinNetworkSimulator
             public int ReorganizationsObserved { get; init; }
             public List<DashboardFork> Forks { get; init; } = new();
             public List<DashboardReorg> RecentReorganizations { get; init; } = new();
+            public List<DashboardChainBlock> ChainGraph { get; init; } = new();
             public DashboardScenario? Scenario { get; init; }
         }
 
@@ -315,6 +333,10 @@ namespace BitcoinNetworkSimulator
   .role-honest { color: var(--good); }
   .role-other { color: var(--warn); }
   .full-width { grid-column: 1 / -1; }
+  .chain-graph-wrap { overflow-x: auto; }
+  .chain-graph-wrap svg { display: block; }
+  .chain-graph-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+  .chain-graph-legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
   .empty { color: var(--text-dim); font-size: 13px; padding: 8px 0; }
   .scenario-panel { margin-bottom: 24px; }
   .scenario-file { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
@@ -376,6 +398,10 @@ namespace BitcoinNetworkSimulator
           <tbody id=""reorgs""></tbody>
         </table>
       </div>
+    </div>
+    <div class=""panel full-width"">
+      <h2>Chain graph <span class=""hint"">recent blocks &amp; forks, by height</span></h2>
+      <div id=""chain-graph""></div>
     </div>
     <div class=""panel full-width"">
       <h2>All participants</h2>
@@ -501,6 +527,83 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+function layoutChainGraph(blocks) {
+  var byHash = {};
+  blocks.forEach(function (b) { byHash[b.hash] = b; });
+
+  var sorted = blocks.slice().sort(function (a, b) { return a.height - b.height; });
+
+  var laneTip = [];
+  var laneOf = {};
+  var placed = [];
+
+  sorted.forEach(function (b) {
+    var lane = -1;
+    for (var i = 0; i < laneTip.length; i++) {
+      if (laneTip[i] === b.previousHash) { lane = i; break; }
+    }
+    if (lane === -1) lane = laneTip.length;
+    laneTip[lane] = b.hash;
+    laneOf[b.hash] = lane;
+    placed.push({ block: b, lane: lane });
+  });
+
+  return { placed: placed, byHash: byHash, laneOf: laneOf, laneCount: laneTip.length };
+}
+
+function renderChainGraph(blocks, tipHashes) {
+  var container = document.getElementById('chain-graph');
+  if (!blocks.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
+
+  var layout = layoutChainGraph(blocks);
+  var heights = blocks.map(function (b) { return b.height; });
+  var minHeight = Math.min.apply(null, heights);
+  var maxHeight = Math.max.apply(null, heights);
+  var maxSeenOnNodes = blocks.reduce(function (m, b) { return Math.max(m, b.nodeIds.length); }, 1);
+
+  var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 24;
+  var width = marginL + (maxHeight - minHeight + 1) * colW + 16;
+  var height = marginT + layout.laneCount * rowH + marginB;
+
+  function xOf(h) { return marginL + (h - minHeight) * colW + colW / 2; }
+  function yOf(lane) { return marginT + lane * rowH + rowH / 2; }
+
+  var svg = '<svg width=""' + width + '"" height=""' + height + '"" viewBox=""0 0 ' + width + ' ' + height + '"">';
+
+  layout.placed.forEach(function (p) {
+    var parent = layout.byHash[p.block.previousHash];
+    if (!parent) return;
+    var parentLane = layout.laneOf[p.block.previousHash];
+    svg += '<line x1=""' + xOf(parent.height) + '"" y1=""' + yOf(parentLane) + '"" x2=""' + xOf(p.block.height) + '"" y2=""' + yOf(p.lane) +
+      '"" stroke=""var(--panel-border)"" stroke-width=""2"" />';
+  });
+
+  for (var h = minHeight; h <= maxHeight; h += 5) {
+    svg += '<text x=""' + xOf(h) + '"" y=""' + (height - 6) + '"" font-size=""10"" fill=""var(--text-dim)"" text-anchor=""middle"">' + h + '</text>';
+  }
+
+  layout.placed.forEach(function (p) {
+    var b = p.block;
+    var isTip = tipHashes.indexOf(b.hash) !== -1;
+    var isShared = b.nodeIds.length >= maxSeenOnNodes;
+    var fill = isTip ? 'var(--accent)' : (isShared ? 'var(--good)' : 'var(--warn)');
+    var r = isTip ? 7 : 5;
+    var title = 'height ' + b.height + '\nbuilt by ' + b.builtBy + '\n' + b.hash + '\n' +
+      b.nodeIds.length + ' node(s): ' + b.nodeIds.join(', ');
+    svg += '<circle cx=""' + xOf(b.height) + '"" cy=""' + yOf(p.lane) + '"" r=""' + r +
+      '"" fill=""' + fill + '"" stroke=""var(--bg)"" stroke-width=""1.5""><title>' + escapeHtml(title) + '</title></circle>';
+  });
+
+  svg += '</svg>';
+
+  container.innerHTML = '<div class=""chain-graph-wrap"">' + svg + '</div>' +
+    '<div class=""chain-graph-legend"">' +
+    '<span><span class=""dot"" style=""background:var(--accent)""></span>current tip</span>' +
+    '<span><span class=""dot"" style=""background:var(--good)""></span>shared by all observed nodes</span>' +
+    '<span><span class=""dot"" style=""background:var(--warn)""></span>minority / orphaned branch</span>' +
+    '</div>';
+}
+
 function renderScenario(sc) {
   var el = document.getElementById('scenario-info');
   if (!sc || !sc.fileName) {
@@ -567,6 +670,7 @@ function refresh() {
     renderPools(s.pools);
     renderForks(s.forks);
     renderReorgs(s.recentReorganizations);
+    renderChainGraph(s.chainGraph, s.forks.map(function (f) { return f.tipHash; }));
     renderAllNodes(s.allNodes);
   }).catch(function (err) { console.error('dashboard refresh failed', err); });
 }

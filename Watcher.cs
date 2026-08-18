@@ -56,7 +56,24 @@ namespace BitcoinNetworkSimulator
         /// <summary>Every currently-live branch among structurally-valid nodes, most-populated first.</summary>
         public List<TipGroup> Tips { get; init; } = new();
         public int ReorganizationsObserved { get; init; }
+        /// <summary>
+        /// The last <see cref="ChainWatcher.ChainGraphTailBlocks"/> blocks of every audited
+        /// node's chain, deduplicated by hash, in height order — enough to draw the recent
+        /// shape of the chain including any live forks. Older history is deliberately
+        /// dropped: it's an unbounded, ever-growing straight line with nothing left to show.
+        /// </summary>
+        public List<ChainGraphBlock> ChainGraph { get; init; } = new();
         public string Explanation { get; init; } = "";
+    }
+
+    /// <summary>One block within the recent chain-graph window, and which currently-audited nodes still carry it.</summary>
+    public sealed class ChainGraphBlock
+    {
+        public string Hash { get; init; } = "";
+        public string PreviousHash { get; init; } = "";
+        public int Height { get; init; }
+        public string BuiltBy { get; init; } = "";
+        public List<string> NodeIds { get; init; } = new();
     }
 
     /// <summary>
@@ -66,6 +83,9 @@ namespace BitcoinNetworkSimulator
     /// </summary>
     public sealed class ChainWatcher
     {
+        /// <summary>How many of each node's most recent blocks feed the dashboard's chain graph.</summary>
+        public const int ChainGraphTailBlocks = 30;
+
         private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private List<string> _nodeIds;
         private readonly object _lock = new();
@@ -159,6 +179,7 @@ namespace BitcoinNetworkSimulator
             lock (_lock) { nodeIds = new List<string>(_nodeIds); }
 
             var audits = new List<NodeAudit>();
+            var chainsByNode = new Dictionary<string, List<Block>>();
 
             foreach (var nodeId in nodeIds)
             {
@@ -188,6 +209,8 @@ namespace BitcoinNetworkSimulator
                         StructurallyValid = validation.Ok,
                         Reason = validation.Reason
                     });
+
+                    chainsByNode[nodeId] = chain;
                 }
                 catch (Exception ex)
                 {
@@ -198,6 +221,37 @@ namespace BitcoinNetworkSimulator
             var allValid = audits.Count == nodeIds.Count && audits.All(a => a.StructurallyValid);
             var minHeight = audits.Count == 0 ? 0 : audits.Min(a => a.Height);
             var maxHeight = audits.Count == 0 ? 0 : audits.Max(a => a.Height);
+
+            // Every node's own chain keeps growing while this loop runs (in-process dispatch is
+            // fast, but this simulation can mine many blocks a second), so slicing each node's
+            // "last N blocks" independently would align each one to a different absolute height
+            // and leave gaps between them. Aligning every node to one shared floor, computed only
+            // now that every chain has been fetched, keeps the graph one connected window.
+            var chainGraphFloor = Math.Max(0, maxHeight - ChainGraphTailBlocks + 1);
+            var graphBlocksByHash = new Dictionary<string, (Block Block, HashSet<string> NodeIds)>();
+            foreach (var (nodeId, chain) in chainsByNode)
+            {
+                for (var i = chain.Count - 1; i >= 0 && chain[i].Index >= chainGraphFloor; i--)
+                {
+                    var block = chain[i];
+                    if (graphBlocksByHash.TryGetValue(block.Hash, out var entry))
+                        entry.NodeIds.Add(nodeId);
+                    else
+                        graphBlocksByHash[block.Hash] = (block, new HashSet<string> { nodeId });
+                }
+            }
+
+            var chainGraph = graphBlocksByHash.Values
+                .Select(e => new ChainGraphBlock
+                {
+                    Hash = e.Block.Hash,
+                    PreviousHash = e.Block.PreviousHash,
+                    Height = e.Block.Index,
+                    BuiltBy = e.Block.BuiltBy,
+                    NodeIds = e.NodeIds.ToList()
+                })
+                .OrderBy(b => b.Height)
+                .ToList();
             var distinctTips = audits.Where(a => a.StructurallyValid).Select(a => a.TipHash).Distinct().ToList();
             var converged = allValid && distinctTips.Count == 1;
             var tips = audits.Where(a => a.StructurallyValid)
@@ -254,6 +308,7 @@ namespace BitcoinNetworkSimulator
                 Nodes = audits,
                 Tips = tips,
                 ReorganizationsObserved = reorganizationsObserved,
+                ChainGraph = chainGraph,
                 Explanation = explanation
             };
 
