@@ -73,13 +73,14 @@ namespace BitcoinNetworkSimulator
             var cts = new CancellationTokenSource();
             var combinedDescription = string.Join(" -> ", phases.Select(p => p.Description).Where(d => !string.IsNullOrWhiteSpace(d)));
             using var watcherStore = new WatcherStore(Path.Combine(RunRootDir, "watcher.db"), Port, loadedScenarioFile != null ? scenarioPath : null, combinedDescription.Length > 0 ? combinedDescription : null);
+            var scenarioRuntime = new ScenarioRuntimeInfo(loadedScenarioFile != null ? scenarioPath : null, combinedDescription.Length > 0 ? combinedDescription : null, phases);
 
             var settings = new GrowthSettings().ApplyPhase(phases[0]);
             var network = new NodeNetwork(RunRootDir, settings.OutboundPeerCount, settings.MaliciousFraction, settings.WalletOnlyFraction, loadedScenarioFile?.ResolvedDefaultRuleSchedule ?? new List<ResolvedDefaultRuleScheduleEntry>(), loadedScenarioFile?.DebasementRatePerBlock ?? 0m);
             var watcher = new ChainWatcher(network.DispatchInternalAsync, new List<string>(), watcherStore);
 
             var server = new NetworkServer(Port, network.ResolveNode,
-                (ctx, route) => Dashboard.HandleAsync(ctx, route, network, watcherStore, watcher));
+                (ctx, route) => Dashboard.HandleAsync(ctx, route, network, watcherStore, watcher, scenarioRuntime));
             server.Start();
 
             await NodeMetadataStore.PreloadKnownSigningKeysAsync(RunRootDir);
@@ -110,6 +111,7 @@ namespace BitcoinNetworkSimulator
             {
                 var phase = phases[phaseIndex];
                 var isLastPhase = phaseIndex == phases.Count - 1;
+                scenarioRuntime.SetCurrentPhase(phaseIndex);
                 if (phaseIndex > 0)
                     settings = settings.ApplyPhase(phase);
 

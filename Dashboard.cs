@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
@@ -16,7 +17,7 @@ namespace BitcoinNetworkSimulator
     /// </summary>
     public static class Dashboard
     {
-        public static async Task HandleAsync(HttpListenerContext ctx, string route, NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher)
+        public static async Task HandleAsync(HttpListenerContext ctx, string route, NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher, ScenarioRuntimeInfo? scenarioRuntime)
         {
             var res = ctx.Response;
             try
@@ -29,7 +30,7 @@ namespace BitcoinNetworkSimulator
                         break;
 
                     case "/summary":
-                        var json = BuildSummaryJson(network, watcherStore, watcher);
+                        var json = BuildSummaryJson(network, watcherStore, watcher, scenarioRuntime);
                         await WriteAsync(res, 200, "application/json", Encoding.UTF8.GetBytes(json));
                         break;
 
@@ -58,7 +59,7 @@ namespace BitcoinNetworkSimulator
         /// counts and the most recent convergence audit into the one JSON payload the page's
         /// JS renders.
         /// </summary>
-        private static string BuildSummaryJson(NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher)
+        private static string BuildSummaryJson(NodeNetwork network, WatcherStore watcherStore, ChainWatcher watcher, ScenarioRuntimeInfo? scenarioRuntime)
         {
             var snapshot = network.GetSnapshot();
             var winCounts = watcherStore.GetWinCountsByNode();
@@ -116,10 +117,45 @@ namespace BitcoinNetworkSimulator
                     Timestamp = r.Timestamp,
                     NodeId = r.NodeId,
                     Reason = r.Reason
-                }).ToList()
+                }).ToList(),
+                Scenario = BuildScenarioSummary(scenarioRuntime)
             };
 
             return JsonSerializer.Serialize(summary, JsonOptions);
+        }
+
+        /// <summary>Summarizes the scenario file (if any) driving this run and its phase timeline, for the dashboard's "Scenario" panel.</summary>
+        private static DashboardScenario? BuildScenarioSummary(ScenarioRuntimeInfo? scenarioRuntime)
+        {
+            if (scenarioRuntime == null) return null;
+
+            var (currentPhaseIndex, startedAtUtc) = scenarioRuntime.CurrentPhase();
+
+            return new DashboardScenario
+            {
+                FileName = scenarioRuntime.ScenarioPath != null ? Path.GetFileName(scenarioRuntime.ScenarioPath) : null,
+                Description = scenarioRuntime.Description,
+                TotalPhases = scenarioRuntime.Phases.Count,
+                CurrentPhaseIndex = currentPhaseIndex,
+                CurrentPhaseElapsedSeconds = Math.Max(0, (int)(DateTime.UtcNow - startedAtUtc).TotalSeconds),
+                Phases = scenarioRuntime.Phases.Select((phase, index) => new DashboardScenarioPhase
+                {
+                    Index = index,
+                    IsCurrent = index == currentPhaseIndex,
+                    Description = phase.Description,
+                    DurationSeconds = phase.DurationSeconds,
+                    NodeGroups = phase.NodeGroups.Select(g => new DashboardScenarioNodeGroup
+                    {
+                        Count = g.Count,
+                        Role = g.Role.ToString(),
+                        HashPower = g.HashPower,
+                        CanMine = g.CanMine,
+                        Pool = g.Pool,
+                        ValueSeeking = g.ValueSeeking,
+                        RulesName = g.RulesName
+                    }).ToList()
+                }).ToList()
+            };
         }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -164,6 +200,36 @@ namespace BitcoinNetworkSimulator
             public string Reason { get; init; } = "";
         }
 
+        private sealed class DashboardScenarioNodeGroup
+        {
+            public int Count { get; init; }
+            public string Role { get; init; } = "";
+            public int HashPower { get; init; }
+            public bool CanMine { get; init; }
+            public string? Pool { get; init; }
+            public bool ValueSeeking { get; init; }
+            public string? RulesName { get; init; }
+        }
+
+        private sealed class DashboardScenarioPhase
+        {
+            public int Index { get; init; }
+            public bool IsCurrent { get; init; }
+            public string? Description { get; init; }
+            public int? DurationSeconds { get; init; }
+            public List<DashboardScenarioNodeGroup> NodeGroups { get; init; } = new();
+        }
+
+        private sealed class DashboardScenario
+        {
+            public string? FileName { get; init; }
+            public string? Description { get; init; }
+            public int TotalPhases { get; init; }
+            public int CurrentPhaseIndex { get; init; }
+            public int CurrentPhaseElapsedSeconds { get; init; }
+            public List<DashboardScenarioPhase> Phases { get; init; } = new();
+        }
+
         private sealed class DashboardSummary
         {
             public string GeneratedAt { get; init; } = "";
@@ -184,6 +250,7 @@ namespace BitcoinNetworkSimulator
             public int ReorganizationsObserved { get; init; }
             public List<DashboardFork> Forks { get; init; } = new();
             public List<DashboardReorg> RecentReorganizations { get; init; } = new();
+            public DashboardScenario? Scenario { get; init; }
         }
 
         private const string HtmlPage = @"<!doctype html>
@@ -249,6 +316,20 @@ namespace BitcoinNetworkSimulator
   .role-other { color: var(--warn); }
   .full-width { grid-column: 1 / -1; }
   .empty { color: var(--text-dim); font-size: 13px; padding: 8px 0; }
+  .scenario-panel { margin-bottom: 24px; }
+  .scenario-file { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
+  .scenario-file code { color: var(--text); }
+  .phase-list { display: flex; flex-direction: column; gap: 8px; }
+  .phase {
+    border: 1px solid var(--panel-border); border-radius: 8px;
+    padding: 10px 12px; font-size: 13px;
+  }
+  .phase.current { border-color: var(--accent); background: rgba(247,147,26,.06); }
+  .phase-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .phase-head .badge { font-size: 11px; padding: 1px 8px; }
+  .phase-desc { color: var(--text-dim); margin-top: 4px; }
+  .phase-groups { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+  .phase-groups .group { display: inline-block; background: var(--bar-bg); border-radius: 6px; padding: 2px 8px; margin: 2px 4px 0 0; color: var(--text); }
 </style>
 </head>
 <body>
@@ -257,6 +338,11 @@ namespace BitcoinNetworkSimulator
     <span id=""state-badge"" class=""badge unknown"">loading…</span>
     &nbsp;chain height <code id=""height"">—</code>
     &nbsp;·&nbsp;updated <code id=""updated"">—</code>
+  </div>
+
+  <div class=""panel scenario-panel"" id=""scenario-panel"">
+    <h2>Scenario</h2>
+    <div id=""scenario-info""></div>
   </div>
 
   <div class=""cards"" id=""cards""></div>
@@ -406,6 +492,51 @@ function renderReorgs(reorgs) {
   }).join('');
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/""/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderScenario(sc) {
+  var el = document.getElementById('scenario-info');
+  if (!sc || !sc.fileName) {
+    el.innerHTML = '<div class=""empty"">No scenario file — running with the default single-node start.</div>';
+    return;
+  }
+
+  var html = '<div class=""scenario-file""><code>' + escapeHtml(sc.fileName) + '</code>' +
+    (sc.description ? ' — ' + escapeHtml(sc.description) : '') + '</div>';
+
+  html += '<div class=""phase-list"">';
+  sc.phases.forEach(function (p) {
+    var duration = p.durationSeconds ? (p.durationSeconds + 's') : 'no automatic stop';
+    var head = 'Phase ' + (p.index + 1) + ' / ' + sc.totalPhases + ' &middot; ' + duration;
+    var currentBadge = p.isCurrent ? ' <span class=""badge healthy"">current &middot; ' + sc.currentPhaseElapsedSeconds + 's elapsed</span>' : '';
+    var groups = p.nodeGroups.map(function (g) {
+      var bits = [g.count + '&times; ' + escapeHtml(g.role)];
+      if (g.hashPower) bits.push('hp ' + g.hashPower);
+      if (!g.canMine) bits.push('wallet-only');
+      if (g.pool) bits.push('pool: ' + escapeHtml(g.pool));
+      if (g.valueSeeking) bits.push('value-seeking');
+      if (g.rulesName) bits.push('rules: ' + escapeHtml(g.rulesName));
+      return '<span class=""group"">' + bits.join(', ') + '</span>';
+    }).join('');
+
+    html += '<div class=""phase' + (p.isCurrent ? ' current' : '') + '"">' +
+      '<div class=""phase-head"">' + head + currentBadge + '</div>' +
+      (p.description ? '<div class=""phase-desc"">' + escapeHtml(p.description) + '</div>' : '') +
+      (groups ? '<div class=""phase-groups"">' + groups + '</div>' : '') +
+      '</div>';
+  });
+  html += '</div>';
+
+  el.innerHTML = html;
+}
+
 function renderState(s) {
   var badge = document.getElementById('state-badge');
   badge.textContent = s.networkState + (s.chainsConverged ? ' · converged' : '');
@@ -418,6 +549,7 @@ var maxPeers = 1;
 function refresh() {
   fetch('summary').then(function (r) { return r.json(); }).then(function (s) {
     renderState(s);
+    renderScenario(s.scenario);
     renderCards(s);
     renderRankedList('top-hashpower', s.topMinersByHashPower,
       function (n) { return n.hashPower; },

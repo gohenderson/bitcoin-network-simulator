@@ -276,6 +276,43 @@ namespace BitcoinNetworkSimulator
         public string? RulesName { get; set; } = null;
     }
 
+    /// <summary>
+    /// The running program's live view of which scenario file (if any) is driving this run
+    /// and which phase is currently active — read by <see cref="Dashboard"/> and updated by
+    /// <see cref="Program"/> at each phase transition.
+    /// </summary>
+    public sealed class ScenarioRuntimeInfo
+    {
+        public string? ScenarioPath { get; }
+        public string? Description { get; }
+        public IReadOnlyList<Scenario> Phases { get; }
+
+        private readonly object _lock = new();
+        private int _currentPhaseIndex;
+        private DateTime _currentPhaseStartedAtUtc = DateTime.UtcNow;
+
+        public ScenarioRuntimeInfo(string? scenarioPath, string? description, IReadOnlyList<Scenario> phases)
+        {
+            ScenarioPath = scenarioPath;
+            Description = description;
+            Phases = phases;
+        }
+
+        public void SetCurrentPhase(int index)
+        {
+            lock (_lock)
+            {
+                _currentPhaseIndex = index;
+                _currentPhaseStartedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        public (int Index, DateTime StartedAtUtc) CurrentPhase()
+        {
+            lock (_lock) { return (_currentPhaseIndex, _currentPhaseStartedAtUtc); }
+        }
+    }
+
     public static class ScenarioLoader
     {
         private static readonly IDeserializer Deserializer = new DeserializerBuilder()
