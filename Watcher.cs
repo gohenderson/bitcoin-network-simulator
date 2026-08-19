@@ -57,10 +57,9 @@ namespace BitcoinNetworkSimulator
         public List<TipGroup> Tips { get; init; } = new();
         public int ReorganizationsObserved { get; init; }
         /// <summary>
-        /// The last <see cref="ChainWatcher.ChainGraphTailBlocks"/> blocks of every audited
-        /// node's chain, deduplicated by hash, in height order — enough to draw the recent
-        /// shape of the chain including any live forks. Older history is deliberately
-        /// dropped: it's an unbounded, ever-growing straight line with nothing left to show.
+        /// Every audited node's full chain from genesis, deduplicated by hash, in height
+        /// order — the dashboard's chain graph collapses long unforked runs client-side, so
+        /// the whole tree stays visible without needing to truncate history here.
         /// </summary>
         public List<ChainGraphBlock> ChainGraph { get; init; } = new();
         public string Explanation { get; init; } = "";
@@ -83,9 +82,6 @@ namespace BitcoinNetworkSimulator
     /// </summary>
     public sealed class ChainWatcher
     {
-        /// <summary>How many of each node's most recent blocks feed the dashboard's chain graph.</summary>
-        public const int ChainGraphTailBlocks = 30;
-
         private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private List<string> _nodeIds;
         private readonly object _lock = new();
@@ -222,18 +218,11 @@ namespace BitcoinNetworkSimulator
             var minHeight = audits.Count == 0 ? 0 : audits.Min(a => a.Height);
             var maxHeight = audits.Count == 0 ? 0 : audits.Max(a => a.Height);
 
-            // Every node's own chain keeps growing while this loop runs (in-process dispatch is
-            // fast, but this simulation can mine many blocks a second), so slicing each node's
-            // "last N blocks" independently would align each one to a different absolute height
-            // and leave gaps between them. Aligning every node to one shared floor, computed only
-            // now that every chain has been fetched, keeps the graph one connected window.
-            var chainGraphFloor = Math.Max(0, maxHeight - ChainGraphTailBlocks + 1);
             var graphBlocksByHash = new Dictionary<string, (Block Block, HashSet<string> NodeIds)>();
             foreach (var (nodeId, chain) in chainsByNode)
             {
-                for (var i = chain.Count - 1; i >= 0 && chain[i].Index >= chainGraphFloor; i--)
+                foreach (var block in chain)
                 {
-                    var block = chain[i];
                     if (graphBlocksByHash.TryGetValue(block.Hash, out var entry))
                         entry.NodeIds.Add(nodeId);
                     else

@@ -34,6 +34,11 @@ namespace BitcoinNetworkSimulator
                         await WriteAsync(res, 200, "application/json", Encoding.UTF8.GetBytes(json));
                         break;
 
+                    case "/chaingraph":
+                        var graphJson = BuildChainGraphJson(watcher);
+                        await WriteAsync(res, 200, "application/json", Encoding.UTF8.GetBytes(graphJson));
+                        break;
+
                     default:
                         await WriteAsync(res, 404, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"not found\"}"));
                         break;
@@ -118,14 +123,6 @@ namespace BitcoinNetworkSimulator
                     NodeId = r.NodeId,
                     Reason = r.Reason
                 }).ToList(),
-                ChainGraph = (lastAudit?.ChainGraph ?? new List<ChainGraphBlock>()).Select(b => new DashboardChainBlock
-                {
-                    Hash = b.Hash,
-                    PreviousHash = b.PreviousHash,
-                    Height = b.Height,
-                    BuiltBy = b.BuiltBy,
-                    NodeIds = b.NodeIds
-                }).ToList(),
                 Scenario = BuildScenarioSummary(scenarioRuntime)
             };
 
@@ -164,6 +161,252 @@ namespace BitcoinNetworkSimulator
                     }).ToList()
                 }).ToList()
             };
+        }
+
+        /// <summary>
+        /// Builds the dashboard's already-collapsed chain graph: prunes fork branches that
+        /// never grew past their first block, splits what remains into segments, and assigns
+        /// each segment a column so the page only ever has to draw a handful of dots and lines
+        /// per fork — never the raw, ever-growing block list.
+        /// </summary>
+        private static string BuildChainGraphJson(ChainWatcher watcher)
+        {
+            var lastAudit = watcher.LastSnapshot;
+            var rawBlocks = lastAudit?.ChainGraph ?? new List<ChainGraphBlock>();
+            var tipHashes = new HashSet<string>((lastAudit?.Tips ?? new List<TipGroup>()).Select(t => t.TipHash));
+
+            var pruned = PruneUngrownForkStubs(rawBlocks);
+            var lanes = AssignLanes(pruned);
+            var segments = BuildChainSegments(pruned);
+            AssignSegmentColumns(segments);
+
+            var maxSeenOnNodes = pruned.Count == 0 ? 1 : Math.Max(1, pruned.Max(b => b.NodeIds.Count));
+
+            DashboardChainSegmentBlock ToBlockDto(ChainGraphBlock b) => new()
+            {
+                Hash = b.Hash,
+                Height = b.Height,
+                BuiltBy = b.BuiltBy,
+                NodeIds = b.NodeIds,
+                IsTip = tipHashes.Contains(b.Hash),
+                IsShared = b.NodeIds.Count >= maxSeenOnNodes
+            };
+
+            var graph = new DashboardChainGraph
+            {
+                TotalColumns = segments.Count == 0 ? 0 : segments.Max(s => s.EndCol) + 1,
+                LaneCount = lanes.LaneCount,
+                Segments = segments.Select(seg =>
+                {
+                    var visible = seg.Collapsed ? new List<ChainGraphBlock> { seg.Blocks[0], seg.Blocks[^1] } : seg.Blocks;
+                    return new DashboardChainSegment
+                    {
+                        Id = seg.Id,
+                        ParentId = seg.Parent?.Id,
+                        Lane = lanes.LaneOf[seg.Blocks[0].Hash],
+                        StartCol = seg.StartCol,
+                        EndCol = seg.EndCol,
+                        Collapsed = seg.Collapsed,
+                        Blocks = visible.Select(ToBlockDto).ToList(),
+                        HiddenCount = seg.Collapsed ? seg.Blocks.Count - 2 : 0,
+                        HiddenFromHeight = seg.Collapsed ? seg.Blocks[1].Height : (int?)null,
+                        HiddenToHeight = seg.Collapsed ? seg.Blocks[^2].Height : (int?)null
+                    };
+                }).ToList()
+            };
+
+            return JsonSerializer.Serialize(graph, JsonOptions);
+        }
+
+        private sealed class LaneAssignment
+        {
+            public Dictionary<string, int> LaneOf { get; init; } = new();
+            public int LaneCount { get; init; }
+        }
+
+        /// <summary>
+        /// Greedily continues a lane when a block's parent is the current tip of that lane.
+        /// A lane whose block turns out to have no children anywhere in the set is freed once
+        /// every block at that same height has had a chance to look for its own parent's tip,
+        /// so a later fork reuses the lowest free lane instead of always growing outward —
+        /// otherwise its connecting line would have to visually jump past an already-dead
+        /// lane's row to reach a new one further out. Freeing must wait for the whole height
+        /// group: two siblings forking from the very same parent only differ by which of them
+        /// still finds that parent's tip in place, and freeing mid-group would erase it before
+        /// the second sibling gets its turn, corrupting both onto the same lane.
+        /// </summary>
+        private static LaneAssignment AssignLanes(List<ChainGraphBlock> blocks)
+        {
+            var childCount = new Dictionary<string, int>();
+            foreach (var b in blocks)
+                childCount[b.PreviousHash] = childCount.GetValueOrDefault(b.PreviousHash) + 1;
+
+            var laneTip = new List<string?>();
+            var laneOf = new Dictionary<string, int>();
+            foreach (var heightGroup in blocks.GroupBy(b => b.Height).OrderBy(g => g.Key))
+            {
+                var placed = new List<(ChainGraphBlock Block, int Lane)>();
+                foreach (var b in heightGroup)
+                {
+                    var lane = laneTip.FindIndex(tip => tip == b.PreviousHash);
+                    if (lane == -1)
+                        lane = laneTip.FindIndex(tip => tip == null);
+                    if (lane == -1)
+                    {
+                        lane = laneTip.Count;
+                        laneTip.Add(b.Hash);
+                    }
+                    else
+                    {
+                        laneTip[lane] = b.Hash;
+                    }
+                    laneOf[b.Hash] = lane;
+                    placed.Add((b, lane));
+                }
+
+                foreach (var (b, lane) in placed)
+                {
+                    if (!childCount.ContainsKey(b.Hash))
+                        laneTip[lane] = null;
+                }
+            }
+            return new LaneAssignment { LaneOf = laneOf, LaneCount = laneTip.Count };
+        }
+
+        /// <summary>
+        /// A fork branch that never grew past its very first block is almost always just two
+        /// honest nodes racing to mine at nearly the same instant, self-resolving within a
+        /// block or two — not a fork worth breaking a collapsible run over. Drops any lane
+        /// that (a) is still only one block long AND (b) has already been left behind by a
+        /// taller lane, i.e. it is no longer the current frontier. A lane that's still tied
+        /// for the tallest is kept regardless of length, since it may simply not have had a
+        /// chance to grow yet.
+        /// </summary>
+        private static List<ChainGraphBlock> PruneUngrownForkStubs(List<ChainGraphBlock> blocks)
+        {
+            if (blocks.Count == 0) return blocks;
+
+            var lanes = AssignLanes(blocks);
+            var byLane = new Dictionary<int, List<ChainGraphBlock>>();
+            foreach (var b in blocks)
+            {
+                var lane = lanes.LaneOf[b.Hash];
+                if (!byLane.TryGetValue(lane, out var list))
+                    byLane[lane] = list = new List<ChainGraphBlock>();
+                list.Add(b);
+            }
+
+            var globalMaxHeight = blocks.Max(b => b.Height);
+            var keep = new HashSet<string>();
+            foreach (var laneBlocks in byLane.Values)
+            {
+                var grown = laneBlocks.Count >= 2 || laneBlocks.Any(b => b.Height == globalMaxHeight);
+                if (grown)
+                    foreach (var b in laneBlocks) keep.Add(b.Hash);
+            }
+
+            return blocks.Where(b => keep.Contains(b.Hash)).ToList();
+        }
+
+        private sealed class ChainSegment
+        {
+            public int Id { get; init; }
+            public List<ChainGraphBlock> Blocks { get; init; } = new();
+            public ChainSegment? Parent { get; init; }
+            public List<ChainSegment> Children { get; } = new();
+            public bool Collapsed { get; set; }
+            public int Span { get; set; }
+            public int StartCol { get; set; }
+            public int EndCol { get; set; }
+        }
+
+        /// <summary>
+        /// Splits the (pruned) block set into segments: maximal simple chains with no
+        /// branching in either direction. A segment starts right after a fork (or at the
+        /// window's root) and ends at the next fork, dead end, or tip. Every block with more
+        /// than one child is necessarily the last block of its own segment and the first
+        /// block of each child segment, so fork points are always segment boundaries and
+        /// therefore always individually visible.
+        /// </summary>
+        private static List<ChainSegment> BuildChainSegments(List<ChainGraphBlock> blocks)
+        {
+            var byHash = blocks.ToDictionary(b => b.Hash);
+            var childBlocks = new Dictionary<string, List<ChainGraphBlock>>();
+            foreach (var b in blocks)
+            {
+                if (byHash.ContainsKey(b.PreviousHash))
+                {
+                    if (!childBlocks.TryGetValue(b.PreviousHash, out var list))
+                        childBlocks[b.PreviousHash] = list = new List<ChainGraphBlock>();
+                    list.Add(b);
+                }
+            }
+
+            var roots = blocks.Where(b => !byHash.ContainsKey(b.PreviousHash)).OrderBy(b => b.Height).ToList();
+
+            var segments = new List<ChainSegment>();
+            var visited = new HashSet<string>();
+            var queue = new Queue<(ChainGraphBlock Block, ChainSegment? ParentSeg)>();
+            foreach (var r in roots) queue.Enqueue((r, null));
+
+            while (queue.Count > 0)
+            {
+                var (block, parentSeg) = queue.Dequeue();
+                if (visited.Contains(block.Hash)) continue;
+
+                var chain = new List<ChainGraphBlock> { block };
+                visited.Add(block.Hash);
+                var current = block;
+                while (childBlocks.TryGetValue(current.Hash, out var kids) && kids.Count == 1)
+                {
+                    current = kids[0];
+                    chain.Add(current);
+                    visited.Add(current.Hash);
+                }
+
+                var seg = new ChainSegment { Id = segments.Count, Blocks = chain, Parent = parentSeg };
+                parentSeg?.Children.Add(seg);
+                segments.Add(seg);
+
+                if (childBlocks.TryGetValue(current.Hash, out var endKids) && endKids.Count > 1)
+                    foreach (var k in endKids) queue.Enqueue((k, seg));
+            }
+
+            return segments;
+        }
+
+        private const int ChainGraphMinHidden = 3;
+
+        /// <summary>
+        /// A segment of 5+ blocks collapses to its first and last block plus one hidden-count
+        /// standing in for everything strictly between them, so a long straight run — forked
+        /// or not — takes up three columns instead of one per block. Each child segment
+        /// starts immediately after its parent's last column, so the whole tree only ever
+        /// takes as many columns as its longest root-to-tip path has segments, regardless of
+        /// how many real blocks that spans.
+        /// </summary>
+        private static void AssignSegmentColumns(List<ChainSegment> segments)
+        {
+            foreach (var seg in segments)
+            {
+                seg.Collapsed = seg.Blocks.Count >= ChainGraphMinHidden + 2;
+                seg.Span = seg.Collapsed ? 3 : seg.Blocks.Count;
+            }
+
+            var roots = segments.Where(s => s.Parent == null).ToList();
+            foreach (var s in roots) s.StartCol = 0;
+
+            var queue = new Queue<ChainSegment>(roots);
+            while (queue.Count > 0)
+            {
+                var seg = queue.Dequeue();
+                seg.EndCol = seg.StartCol + seg.Span - 1;
+                foreach (var child in seg.Children)
+                {
+                    child.StartCol = seg.EndCol + 1;
+                    queue.Enqueue(child);
+                }
+            }
         }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -208,13 +451,35 @@ namespace BitcoinNetworkSimulator
             public string Reason { get; init; } = "";
         }
 
-        private sealed class DashboardChainBlock
+        private sealed class DashboardChainSegmentBlock
         {
             public string Hash { get; init; } = "";
-            public string PreviousHash { get; init; } = "";
             public int Height { get; init; }
             public string BuiltBy { get; init; } = "";
             public List<string> NodeIds { get; init; } = new();
+            public bool IsTip { get; init; }
+            public bool IsShared { get; init; }
+        }
+
+        private sealed class DashboardChainSegment
+        {
+            public int Id { get; init; }
+            public int? ParentId { get; init; }
+            public int Lane { get; init; }
+            public int StartCol { get; init; }
+            public int EndCol { get; init; }
+            public bool Collapsed { get; init; }
+            public List<DashboardChainSegmentBlock> Blocks { get; init; } = new();
+            public int HiddenCount { get; init; }
+            public int? HiddenFromHeight { get; init; }
+            public int? HiddenToHeight { get; init; }
+        }
+
+        private sealed class DashboardChainGraph
+        {
+            public int TotalColumns { get; init; }
+            public int LaneCount { get; init; }
+            public List<DashboardChainSegment> Segments { get; init; } = new();
         }
 
         private sealed class DashboardScenarioNodeGroup
@@ -267,7 +532,6 @@ namespace BitcoinNetworkSimulator
             public int ReorganizationsObserved { get; init; }
             public List<DashboardFork> Forks { get; init; } = new();
             public List<DashboardReorg> RecentReorganizations { get; init; } = new();
-            public List<DashboardChainBlock> ChainGraph { get; init; } = new();
             public DashboardScenario? Scenario { get; init; }
         }
 
@@ -400,7 +664,7 @@ namespace BitcoinNetworkSimulator
       </div>
     </div>
     <div class=""panel full-width"">
-      <h2>Chain graph <span class=""hint"">recent blocks &amp; forks, by height</span></h2>
+      <h2>Chain graph <span class=""hint"">genesis to tip, collapsed where straight</span></h2>
       <div id=""chain-graph""></div>
     </div>
     <div class=""panel full-width"">
@@ -527,80 +791,81 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
-function layoutChainGraph(blocks) {
-  var byHash = {};
-  blocks.forEach(function (b) { byHash[b.hash] = b; });
-
-  var sorted = blocks.slice().sort(function (a, b) { return a.height - b.height; });
-
-  var laneTip = [];
-  var laneOf = {};
-  var placed = [];
-
-  sorted.forEach(function (b) {
-    var lane = -1;
-    for (var i = 0; i < laneTip.length; i++) {
-      if (laneTip[i] === b.previousHash) { lane = i; break; }
-    }
-    if (lane === -1) lane = laneTip.length;
-    laneTip[lane] = b.hash;
-    laneOf[b.hash] = lane;
-    placed.push({ block: b, lane: lane });
-  });
-
-  return { placed: placed, byHash: byHash, laneOf: laneOf, laneCount: laneTip.length };
-}
-
-function renderChainGraph(blocks, tipHashes) {
+// The server (Dashboard.BuildChainGraphJson) already pruned ungrown fork stubs, split the
+// remaining blocks into segments, and assigned each one a column and lane — this is a pure
+// renderer over that pre-collapsed shape, never the raw block-per-height data.
+function renderChainGraph(graph) {
   var container = document.getElementById('chain-graph');
-  if (!blocks.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
+  if (!graph || !graph.segments.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
 
-  var layout = layoutChainGraph(blocks);
-  var heights = blocks.map(function (b) { return b.height; });
-  var minHeight = Math.min.apply(null, heights);
-  var maxHeight = Math.max.apply(null, heights);
-  var maxSeenOnNodes = blocks.reduce(function (m, b) { return Math.max(m, b.nodeIds.length); }, 1);
+  var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 10;
+  var width = marginL + graph.totalColumns * colW + 16;
+  var height = marginT + graph.laneCount * rowH + marginB;
 
-  var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 24;
-  var width = marginL + (maxHeight - minHeight + 1) * colW + 16;
-  var height = marginT + layout.laneCount * rowH + marginB;
-
-  function xOf(h) { return marginL + (h - minHeight) * colW + colW / 2; }
+  function xOf(col) { return marginL + col * colW + colW / 2; }
   function yOf(lane) { return marginT + lane * rowH + rowH / 2; }
 
-  var svg = '<svg width=""' + width + '"" height=""' + height + '"" viewBox=""0 0 ' + width + ' ' + height + '"">';
+  var segById = {};
+  graph.segments.forEach(function (s) { segById[s.id] = s; });
 
-  layout.placed.forEach(function (p) {
-    var parent = layout.byHash[p.block.previousHash];
-    if (!parent) return;
-    var parentLane = layout.laneOf[p.block.previousHash];
-    svg += '<line x1=""' + xOf(parent.height) + '"" y1=""' + yOf(parentLane) + '"" x2=""' + xOf(p.block.height) + '"" y2=""' + yOf(p.lane) +
-      '"" stroke=""var(--panel-border)"" stroke-width=""2"" />';
-  });
+  var lines = '', dots = '';
 
-  for (var h = minHeight; h <= maxHeight; h += 5) {
-    svg += '<text x=""' + xOf(h) + '"" y=""' + (height - 6) + '"" font-size=""10"" fill=""var(--text-dim)"" text-anchor=""middle"">' + h + '</text>';
-  }
-
-  layout.placed.forEach(function (p) {
-    var b = p.block;
-    var isTip = tipHashes.indexOf(b.hash) !== -1;
-    var isShared = b.nodeIds.length >= maxSeenOnNodes;
-    var fill = isTip ? 'var(--accent)' : (isShared ? 'var(--good)' : 'var(--warn)');
-    var r = isTip ? 7 : 5;
+  function renderBlockDot(b, col, lane) {
+    var fill = b.isTip ? 'var(--accent)' : (b.isShared ? 'var(--good)' : 'var(--warn)');
+    var r = b.isTip ? 7 : 5;
     var title = 'height ' + b.height + '\nbuilt by ' + b.builtBy + '\n' + b.hash + '\n' +
       b.nodeIds.length + ' node(s): ' + b.nodeIds.join(', ');
-    svg += '<circle cx=""' + xOf(b.height) + '"" cy=""' + yOf(p.lane) + '"" r=""' + r +
-      '"" fill=""' + fill + '"" stroke=""var(--bg)"" stroke-width=""1.5""><title>' + escapeHtml(title) + '</title></circle>';
+    var x = xOf(col), y = yOf(lane);
+    dots += '<circle cx=""' + x + '"" cy=""' + y + '"" r=""' + r + '"" fill=""' + fill +
+      '"" stroke=""var(--bg)"" stroke-width=""1.5""><title>' + escapeHtml(title) + '</title></circle>';
+    return { x: x, y: y };
+  }
+
+  function renderGapDot(count, fromHeight, toHeight, col, lane) {
+    var x = xOf(col), y = yOf(lane);
+    var range = toHeight > fromHeight ? (fromHeight + '–' + toHeight) : String(fromHeight);
+    var title = count + ' block(s) hidden (height ' + range + ', no forks)';
+    var fontSize = count >= 100 ? 8 : 9;
+    dots += '<g><title>' + escapeHtml(title) + '</title>' +
+      '<circle cx=""' + x + '"" cy=""' + y + '"" r=""9"" fill=""var(--bar-bg)"" stroke=""var(--panel-border)"" stroke-width=""1.5"" />' +
+      '<text x=""' + x + '"" y=""' + y + '"" font-size=""' + fontSize + '"" fill=""var(--text-dim)"" text-anchor=""middle"" dominant-baseline=""central"">' + count + '</text>' +
+      '</g>';
+    return { x: x, y: y };
+  }
+
+  graph.segments.forEach(function (seg) {
+    var points;
+    if (seg.collapsed) {
+      points = [
+        renderBlockDot(seg.blocks[0], seg.startCol, seg.lane),
+        renderGapDot(seg.hiddenCount, seg.hiddenFromHeight, seg.hiddenToHeight, seg.startCol + 1, seg.lane),
+        renderBlockDot(seg.blocks[1], seg.startCol + 2, seg.lane)
+      ];
+    } else {
+      points = seg.blocks.map(function (b, i) { return renderBlockDot(b, seg.startCol + i, seg.lane); });
+    }
+    for (var i = 1; i < points.length; i++) {
+      lines += '<line x1=""' + points[i - 1].x + '"" y1=""' + points[i - 1].y + '"" x2=""' + points[i].x + '"" y2=""' + points[i].y +
+        '"" stroke=""var(--panel-border)"" stroke-width=""2""' + (seg.collapsed ? ' stroke-dasharray=""4,3""' : '') + ' />';
+    }
+
+    if (seg.parentId !== null && seg.parentId !== undefined) {
+      var parentSeg = segById[seg.parentId];
+      var parentCol = parentSeg.collapsed ? parentSeg.startCol + 2 : parentSeg.startCol + parentSeg.blocks.length - 1;
+      lines += '<line x1=""' + xOf(parentCol) + '"" y1=""' + yOf(parentSeg.lane) + '"" x2=""' + points[0].x +
+        '"" y2=""' + points[0].y + '"" stroke=""var(--panel-border)"" stroke-width=""2"" />';
+    }
   });
 
-  svg += '</svg>';
+  var svg = '<svg width=""' + width + '"" height=""' + height + '"" viewBox=""0 0 ' + width + ' ' + height + '"">' +
+    lines + dots + '</svg>';
 
   container.innerHTML = '<div class=""chain-graph-wrap"">' + svg + '</div>' +
     '<div class=""chain-graph-legend"">' +
     '<span><span class=""dot"" style=""background:var(--accent)""></span>current tip</span>' +
     '<span><span class=""dot"" style=""background:var(--good)""></span>shared by all observed nodes</span>' +
     '<span><span class=""dot"" style=""background:var(--warn)""></span>minority / orphaned branch</span>' +
+    '<span><span class=""dot"" style=""background:var(--bar-bg); border:1px solid var(--panel-border)""></span>N blocks compressed (no forks in between) &#8212; hover any dot for height/details</span>' +
     '</div>';
 }
 
@@ -620,7 +885,7 @@ function renderScenario(sc) {
     var head = 'Phase ' + (p.index + 1) + ' / ' + sc.totalPhases + ' &middot; ' + duration;
     var currentBadge = p.isCurrent ? ' <span class=""badge healthy"">current &middot; ' + sc.currentPhaseElapsedSeconds + 's elapsed</span>' : '';
     var groups = p.nodeGroups.map(function (g) {
-      var bits = [g.count + '&times; ' + escapeHtml(g.role)];
+      var bits = [g.count + '&#215; ' + escapeHtml(g.role)];
       if (g.hashPower) bits.push('hp ' + g.hashPower);
       if (!g.canMine) bits.push('wallet-only');
       if (g.pool) bits.push('pool: ' + escapeHtml(g.pool));
@@ -650,7 +915,11 @@ function renderState(s) {
 
 var maxPeers = 1;
 function refresh() {
-  fetch('summary').then(function (r) { return r.json(); }).then(function (s) {
+  Promise.all([
+    fetch('summary').then(function (r) { return r.json(); }),
+    fetch('chaingraph').then(function (r) { return r.json(); })
+  ]).then(function (results) {
+    var s = results[0], graph = results[1];
     renderState(s);
     renderScenario(s.scenario);
     renderCards(s);
@@ -670,7 +939,7 @@ function refresh() {
     renderPools(s.pools);
     renderForks(s.forks);
     renderReorgs(s.recentReorganizations);
-    renderChainGraph(s.chainGraph, s.forks.map(function (f) { return f.tipHash; }));
+    renderChainGraph(graph);
     renderAllNodes(s.allNodes);
   }).catch(function (err) { console.error('dashboard refresh failed', err); });
 }
