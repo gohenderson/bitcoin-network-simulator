@@ -71,6 +71,8 @@ namespace BitcoinNetworkSimulator
             var lastAudit = watcher.LastSnapshot;
             var totalHashPower = Math.Max(1, snapshot.Nodes.Sum(n => n.HashPower));
             var validatedNodeCount = Math.Max(1, lastAudit?.Tips.Sum(t => t.NodeIds.Count) ?? 0);
+            var hashPowerByNodeId = snapshot.Nodes.ToDictionary(n => n.Id, n => n.HashPower);
+            var (balances, totalSent) = ComputeLedgerSummary(network, lastAudit);
 
             var dashboardNodes = snapshot.Nodes.Select(n => new DashboardNode
             {
@@ -82,7 +84,9 @@ namespace BitcoinNetworkSimulator
                 Pool = n.Pool,
                 EconomicWeight = n.EconomicWeight,
                 PeerCount = n.PeerCount,
-                BlocksWon = winCounts.GetValueOrDefault(n.Id, 0)
+                BlocksWon = winCounts.GetValueOrDefault(n.Id, 0),
+                Balance = balances.GetValueOrDefault(n.Id),
+                TotalSent = totalSent.GetValueOrDefault(n.Id)
             }).ToList();
 
             var summary = new DashboardSummary
@@ -109,13 +113,19 @@ namespace BitcoinNetworkSimulator
                 TopByInfluence = dashboardNodes.OrderByDescending(n => n.PeerCount).Take(10).ToList(),
                 AllNodes = dashboardNodes.OrderByDescending(n => n.HashPower).ToList(),
                 ReorganizationsObserved = lastAudit?.ReorganizationsObserved ?? 0,
-                Forks = (lastAudit?.Tips ?? new List<TipGroup>()).Select(t => new DashboardFork
+                Forks = (lastAudit?.Tips ?? new List<TipGroup>()).Select(t =>
                 {
-                    TipHash = t.TipHash,
-                    Height = t.Height,
-                    NodeCount = t.NodeIds.Count,
-                    Share = (double)t.NodeIds.Count / validatedNodeCount,
-                    NodeIds = t.NodeIds
+                    var hashPower = t.NodeIds.Sum(id => hashPowerByNodeId.GetValueOrDefault(id, 0));
+                    return new DashboardFork
+                    {
+                        TipHash = t.TipHash,
+                        Height = t.Height,
+                        NodeCount = t.NodeIds.Count,
+                        Share = (double)t.NodeIds.Count / validatedNodeCount,
+                        HashPower = hashPower,
+                        HashPowerShare = (double)hashPower / totalHashPower,
+                        NodeIds = t.NodeIds
+                    };
                 }).ToList(),
                 RecentReorganizations = watcherStore.GetRecentReorganizations(10).Select(r => new DashboardReorg
                 {
@@ -127,6 +137,32 @@ namespace BitcoinNetworkSimulator
             };
 
             return JsonSerializer.Serialize(summary, JsonOptions);
+        }
+
+        /// <summary>
+        /// Current balance and total-ever-sent (excluding coinbase, since minting to yourself
+        /// isn't spending) per account, read from whichever node is on the currently
+        /// most-agreed-upon tip — the same "arbitrary but consistent" stand-in the rest of the
+        /// dashboard already uses for a single canonical view of the network. Falls back to
+        /// any live node if no audit has run yet.
+        /// </summary>
+        private static (Dictionary<string, decimal> Balances, Dictionary<string, decimal> TotalSent) ComputeLedgerSummary(NodeNetwork network, WatcherSnapshot? lastAudit)
+        {
+            var representativeNodeId = lastAudit?.Tips.FirstOrDefault()?.NodeIds.FirstOrDefault()
+                ?? network.GetAllNodeIds().FirstOrDefault();
+            var node = representativeNodeId != null ? network.ResolveNode(representativeNodeId) : null;
+            if (node == null) return (new Dictionary<string, decimal>(), new Dictionary<string, decimal>());
+
+            var chain = node.Chain.Snapshot();
+            var balances = Ledger.ComputeBalances(chain);
+
+            var totalSent = new Dictionary<string, decimal>();
+            foreach (var block in chain)
+                foreach (var tx in block.Transactions)
+                    if (tx.From != Economics.CoinbaseSender)
+                        totalSent[tx.From] = totalSent.GetValueOrDefault(tx.From) + tx.Amount;
+
+            return (balances, totalSent);
         }
 
         /// <summary>Summarizes the scenario file (if any) driving this run and its phase timeline, for the dashboard's "Scenario" panel.</summary>
@@ -425,6 +461,8 @@ namespace BitcoinNetworkSimulator
             public int EconomicWeight { get; init; }
             public int PeerCount { get; init; }
             public int BlocksWon { get; init; }
+            public decimal Balance { get; init; }
+            public decimal TotalSent { get; init; }
         }
 
         private sealed class DashboardPool
@@ -441,6 +479,8 @@ namespace BitcoinNetworkSimulator
             public int Height { get; init; }
             public int NodeCount { get; init; }
             public double Share { get; init; }
+            public int HashPower { get; init; }
+            public double HashPowerShare { get; init; }
             public List<string> NodeIds { get; init; } = new();
         }
 
@@ -585,6 +625,7 @@ namespace BitcoinNetworkSimulator
     display: grid; grid-template-columns: 28px 90px 1fr 60px; align-items: center;
     gap: 8px; padding: 5px 0; font-size: 13px;
   }
+  .row.fork-row { grid-template-columns: 28px 90px 1fr 170px; }
   .row .rank { color: var(--text-dim); font-variant-numeric: tabular-nums; }
   .row .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); }
@@ -616,6 +657,29 @@ namespace BitcoinNetworkSimulator
   .phase-desc { color: var(--text-dim); margin-top: 4px; }
   .phase-groups { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
   .phase-groups .group { display: inline-block; background: var(--bar-bg); border-radius: 6px; padding: 2px 8px; margin: 2px 4px 0 0; color: var(--text); }
+  .explorer-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .explorer-controls select, .explorer-controls input, .explorer-controls button {
+    background: var(--bar-bg); color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 6px 10px; font-size: 13px;
+  }
+  .explorer-controls button { cursor: pointer; }
+  .explorer-controls button:hover { border-color: var(--accent); }
+  .explorer-controls input { flex: 1; min-width: 180px; }
+  .explorer-status { color: var(--text-dim); font-size: 12px; }
+  .explorer-block { border: 1px solid var(--panel-border); border-radius: 8px; margin-bottom: 6px; overflow: hidden; }
+  .explorer-block-row {
+    display: grid; grid-template-columns: 70px 1fr 110px 60px 150px; gap: 8px;
+    padding: 8px 12px; font-size: 13px; cursor: pointer; align-items: center;
+  }
+  .explorer-block-row:hover, .explorer-block-row.expanded { background: var(--bar-bg); }
+  .explorer-block-row .h { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .explorer-block-row .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .explorer-block-row .tip-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: rgba(247,147,26,.15); color: var(--accent); margin-left: 6px; }
+  .explorer-block-detail { padding: 12px; border-top: 1px solid var(--panel-border); font-size: 13px; }
+  .explorer-block-detail .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; margin-bottom: 10px; }
+  .explorer-block-detail .kv div:nth-child(odd) { color: var(--text-dim); }
+  .explorer-block-detail .kv div:nth-child(even) { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+  .explorer-load-more { text-align: center; padding: 4px 0 12px; }
 </style>
 </head>
 <body>
@@ -668,12 +732,24 @@ namespace BitcoinNetworkSimulator
       <div id=""chain-graph""></div>
     </div>
     <div class=""panel full-width"">
+      <h2>Block explorer <span class=""hint"">browse any node's own chain</span></h2>
+      <div class=""explorer-controls"">
+        <select id=""explorer-node""><option value="""">Pick a node…</option></select>
+        <input id=""explorer-search"" type=""text"" placeholder=""jump to height or hash prefix"">
+        <button id=""explorer-go"" type=""button"">Go</button>
+        <button id=""explorer-reload"" type=""button"">Reload</button>
+        <span id=""explorer-status"" class=""explorer-status""></span>
+      </div>
+      <div id=""explorer-body""><div class=""empty"">Pick a node above to browse its chain.</div></div>
+    </div>
+    <div class=""panel full-width"">
       <h2>All participants</h2>
       <div style=""max-height:420px; overflow-y:auto;"">
         <table>
           <thead><tr>
             <th>Node</th><th>Role</th><th>Mines</th><th>Hash power</th>
             <th>Pool</th><th>Blocks won</th><th>Peers</th><th>Economic weight</th>
+            <th>Balance</th><th>Sent</th>
           </tr></thead>
           <tbody id=""all-nodes""></tbody>
         </table>
@@ -730,9 +806,13 @@ function renderCards(s) {
   }).join('');
 }
 
+function fmtCoins(x) {
+  return Number(x).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') || '0';
+}
+
 function renderAllNodes(nodes) {
   var tbody = document.getElementById('all-nodes');
-  if (!nodes.length) { tbody.innerHTML = '<tr><td colspan=""8"" class=""empty"">No nodes yet.</td></tr>'; return; }
+  if (!nodes.length) { tbody.innerHTML = '<tr><td colspan=""10"" class=""empty"">No nodes yet.</td></tr>'; return; }
   tbody.innerHTML = nodes.map(function (n) {
     var roleClass = n.role === 'Honest' ? 'role-honest' : 'role-other';
     return '<tr>' +
@@ -744,6 +824,8 @@ function renderAllNodes(nodes) {
       '<td>' + n.blocksWon + '</td>' +
       '<td>' + n.peerCount + '</td>' +
       '<td>' + n.economicWeight + '</td>' +
+      '<td>' + fmtCoins(n.balance) + '</td>' +
+      '<td>' + fmtCoins(n.totalSent) + '</td>' +
       '</tr>';
   }).join('');
 }
@@ -758,13 +840,14 @@ function renderForks(forks) {
   }
   var html = '';
   forks.forEach(function (f, i) {
-    var pct = Math.max(f.share * 100, 1.5);
+    var pct = Math.max(Math.max(f.share, f.hashPowerShare) * 100, 1.5);
     var title = f.tipHash + '\n' + f.nodeIds.join(', ');
-    html += '<div class=""row"" title=""' + title + '"">' +
+    html += '<div class=""row fork-row"" title=""' + title + '"">' +
       '<span class=""rank"">#' + (i + 1) + '</span>' +
       '<span class=""id"">' + f.tipHash.slice(0, 8) + '… @' + f.height + '</span>' +
       '<span class=""bar-track""><span class=""bar-fill"" style=""width:' + pct + '%""></span></span>' +
-      '<span class=""num"">' + f.nodeCount + ' node(s)</span>' +
+      '<span class=""num"">' + f.nodeCount + ' node(s) (' + fmtPct(f.share) + ') &middot; ' +
+      f.hashPower + ' hp (' + fmtPct(f.hashPowerShare) + ')</span>' +
       '</div>';
   });
   el.innerHTML = html;
@@ -869,6 +952,166 @@ function renderChainGraph(graph) {
     '</div>';
 }
 
+// Block explorer: fetches one node's own /chain endpoint directly (same origin, absolute
+// path — the dashboard's own JSON endpoints are all under /dashboard/, but a node's routes
+// live at the site root) rather than through any dashboard-built endpoint, and browses it
+// entirely client-side. Deliberately NOT tied to the 2s auto-refresh loop — a chain can grow
+// large, so it only ever fetches on an explicit user action (picking a node, searching,
+// reloading), never automatically.
+var EXPLORER_PAGE_SIZE = 50;
+var explorerChain = null;
+var explorerNodeId = '';
+var explorerStart = 0;
+var explorerEnd = 0;
+var explorerExpandedHash = null;
+var explorerKnownNodeIds = [];
+
+function populateExplorerNodeOptions(nodeIds) {
+  var changed = nodeIds.length !== explorerKnownNodeIds.length ||
+    nodeIds.some(function (id, i) { return id !== explorerKnownNodeIds[i]; });
+  if (!changed) return;
+  explorerKnownNodeIds = nodeIds.slice();
+
+  var select = document.getElementById('explorer-node');
+  var current = select.value;
+  var html = '<option value="""">Pick a node…</option>';
+  nodeIds.forEach(function (id) { html += '<option value=""' + id + '"">' + id + '</option>'; });
+  select.innerHTML = html;
+  if (nodeIds.indexOf(current) !== -1) select.value = current;
+}
+
+function explorerSetStatus(text) {
+  document.getElementById('explorer-status').textContent = text;
+}
+
+function explorerLoad(nodeId, focusQuery) {
+  if (!nodeId) return;
+  explorerNodeId = nodeId;
+  explorerSetStatus('loading…');
+  fetch('/' + nodeId + '/chain').then(function (r) { return r.json(); }).then(function (chain) {
+    explorerChain = chain;
+    explorerSetStatus(chain.length + ' block(s), tip height ' + (chain.length - 1));
+    if (focusQuery) {
+      explorerJumpTo(focusQuery);
+    } else {
+      explorerEnd = chain.length;
+      explorerStart = Math.max(0, explorerEnd - EXPLORER_PAGE_SIZE);
+      explorerExpandedHash = null;
+      renderExplorer();
+    }
+  }).catch(function (err) {
+    explorerChain = null;
+    explorerSetStatus('failed to load');
+    document.getElementById('explorer-body').innerHTML = '<div class=""empty"">Could not load this node&#39;s chain: ' + escapeHtml(String(err)) + '</div>';
+  });
+}
+
+function explorerFindIndex(query) {
+  if (/^\d+$/.test(query)) {
+    var h = parseInt(query, 10);
+    return (h >= 0 && h < explorerChain.length) ? h : -1;
+  }
+  var q = query.trim().toLowerCase();
+  for (var i = explorerChain.length - 1; i >= 0; i--) {
+    if (explorerChain[i].Hash.toLowerCase().indexOf(q) === 0) return i;
+  }
+  return -1;
+}
+
+function explorerJumpTo(query) {
+  if (!explorerChain) return;
+  var idx = explorerFindIndex(String(query).trim());
+  if (idx === -1) { explorerSetStatus('no block matches ""' + query + '""'); return; }
+  explorerEnd = Math.min(explorerChain.length, idx + 1 + Math.floor(EXPLORER_PAGE_SIZE / 2));
+  explorerStart = Math.max(0, Math.min(idx, explorerEnd - EXPLORER_PAGE_SIZE));
+  explorerExpandedHash = explorerChain[idx].Hash;
+  explorerSetStatus(explorerChain.length + ' block(s), tip height ' + (explorerChain.length - 1));
+  renderExplorer();
+}
+
+function explorerShowOlder() {
+  explorerStart = Math.max(0, explorerStart - EXPLORER_PAGE_SIZE);
+  renderExplorer();
+}
+
+function explorerToggle(hash) {
+  explorerExpandedHash = (explorerExpandedHash === hash) ? null : hash;
+  renderExplorer();
+}
+
+function explorerTxRows(txs) {
+  if (!txs.length) return '<div class=""empty"">No transactions.</div>';
+  return '<table><thead><tr><th>From</th><th>To</th><th>Amount</th></tr></thead><tbody>' +
+    txs.map(function (t) {
+      var fromClass = t.From === 'coinbase' ? ' class=""role-honest""' : '';
+      return '<tr><td' + fromClass + '>' + escapeHtml(t.From) + '</td><td>' + escapeHtml(t.To) + '</td><td>' + t.Amount + '</td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+function renderExplorer() {
+  var body = document.getElementById('explorer-body');
+  if (!explorerChain) { body.innerHTML = '<div class=""empty"">Pick a node above to browse its chain.</div>'; return; }
+  if (!explorerChain.length) { body.innerHTML = '<div class=""empty"">This node has no blocks.</div>'; return; }
+
+  var tipHeight = explorerChain.length - 1;
+  var html = '';
+  if (explorerStart > 0) {
+    html += '<div class=""explorer-load-more""><button type=""button"" onclick=""explorerShowOlder()"">Show older blocks</button></div>';
+  }
+
+  for (var i = explorerEnd - 1; i >= explorerStart; i--) {
+    var b = explorerChain[i];
+    var isTip = i === tipHeight;
+    var expanded = explorerExpandedHash === b.Hash;
+    html += '<div class=""explorer-block"">' +
+      '<div class=""explorer-block-row' + (expanded ? ' expanded' : '') + '"" onclick=""explorerToggle(&quot;' + b.Hash + '&quot;)"">' +
+      '<span class=""h"">#' + b.Index + '</span>' +
+      '<span class=""hash"">' + b.Hash + (isTip ? '<span class=""tip-badge"">tip</span>' : '') + '</span>' +
+      '<span>' + escapeHtml(b.BuiltBy) + '</span>' +
+      '<span>' + b.Transactions.length + ' tx</span>' +
+      '<span>' + escapeHtml(new Date(b.Timestamp).toLocaleString()) + '</span>' +
+      '</div>';
+    if (expanded) {
+      html += '<div class=""explorer-block-detail"">' +
+        '<div class=""kv"">' +
+        '<div>Hash</div><div>' + b.Hash + '</div>' +
+        '<div>Previous hash</div><div>' + b.PreviousHash + '</div>' +
+        '<div>Built by</div><div>' + escapeHtml(b.BuiltBy) + '</div>' +
+        '<div>Signature</div><div>' + b.Signature + '</div>' +
+        '<div>Target</div><div>' + b.Target + '</div>' +
+        '<div>Nonce</div><div>' + b.Nonce + '</div>' +
+        '<div>Timestamp</div><div>' + b.Timestamp + '</div>' +
+        '</div>' +
+        explorerTxRows(b.Transactions) +
+        '</div>';
+    }
+    html += '</div>';
+  }
+
+  body.innerHTML = html;
+}
+
+document.getElementById('explorer-node').addEventListener('change', function () {
+  explorerLoad(this.value);
+});
+document.getElementById('explorer-go').addEventListener('click', function () {
+  var q = document.getElementById('explorer-search').value.trim();
+  if (!q) return;
+  var selected = document.getElementById('explorer-node').value;
+  if (!selected) { explorerSetStatus('pick a node first'); return; }
+  if (selected !== explorerNodeId || !explorerChain) {
+    explorerLoad(selected, q);
+  } else {
+    explorerJumpTo(q);
+  }
+});
+document.getElementById('explorer-search').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') document.getElementById('explorer-go').click();
+});
+document.getElementById('explorer-reload').addEventListener('click', function () {
+  if (explorerNodeId) explorerLoad(explorerNodeId);
+});
+
 function renderScenario(sc) {
   var el = document.getElementById('scenario-info');
   if (!sc || !sc.fileName) {
@@ -941,6 +1184,7 @@ function refresh() {
     renderReorgs(s.recentReorganizations);
     renderChainGraph(graph);
     renderAllNodes(s.allNodes);
+    populateExplorerNodeOptions(s.allNodes.map(function (n) { return n.id; }).sort());
   }).catch(function (err) { console.error('dashboard refresh failed', err); });
 }
 
