@@ -35,7 +35,7 @@ namespace BitcoinNetworkSimulator
                         break;
 
                     case "/chaingraph":
-                        var graphJson = BuildChainGraphJson(watcher);
+                        var graphJson = BuildChainGraphJson(watcher, network);
                         await WriteAsync(res, 200, "application/json", Encoding.UTF8.GetBytes(graphJson));
                         break;
 
@@ -69,9 +69,7 @@ namespace BitcoinNetworkSimulator
             var snapshot = network.GetSnapshot();
             var winCounts = watcherStore.GetWinCountsByNode();
             var lastAudit = watcher.LastSnapshot;
-            var totalHashPower = Math.Max(1, snapshot.Nodes.Sum(n => n.HashPower));
-            var validatedNodeCount = Math.Max(1, lastAudit?.Tips.Sum(t => t.NodeIds.Count) ?? 0);
-            var hashPowerByNodeId = snapshot.Nodes.ToDictionary(n => n.Id, n => n.HashPower);
+            var (hashPowerByNodeId, totalHashPower, validatedNodeCount) = ComputeInfluenceContext(snapshot, lastAudit);
             var (balances, totalSent) = ComputeLedgerSummary(network, lastAudit);
 
             var dashboardNodes = snapshot.Nodes.Select(n => new DashboardNode
@@ -165,6 +163,20 @@ namespace BitcoinNetworkSimulator
             return (balances, totalSent);
         }
 
+        /// <summary>
+        /// Per-node hash power and the network-wide totals it's shared against, used to turn a
+        /// group of node ids (a fork's tip, say) into a hash-power share and a node-count
+        /// share — the same two proportions the Forks panel and the chain graph's tip labels
+        /// both report.
+        /// </summary>
+        private static (Dictionary<string, int> HashPowerByNodeId, int TotalHashPower, int ValidatedNodeCount) ComputeInfluenceContext(NetworkSnapshot snapshot, WatcherSnapshot? lastAudit)
+        {
+            var hashPowerByNodeId = snapshot.Nodes.ToDictionary(n => n.Id, n => n.HashPower);
+            var totalHashPower = Math.Max(1, snapshot.Nodes.Sum(n => n.HashPower));
+            var validatedNodeCount = Math.Max(1, lastAudit?.Tips.Sum(t => t.NodeIds.Count) ?? 0);
+            return (hashPowerByNodeId, totalHashPower, validatedNodeCount);
+        }
+
         /// <summary>Summarizes the scenario file (if any) driving this run and its phase timeline, for the dashboard's "Scenario" panel.</summary>
         private static DashboardScenario? BuildScenarioSummary(ScenarioRuntimeInfo? scenarioRuntime)
         {
@@ -205,11 +217,13 @@ namespace BitcoinNetworkSimulator
         /// each segment a column so the page only ever has to draw a handful of dots and lines
         /// per fork — never the raw, ever-growing block list.
         /// </summary>
-        private static string BuildChainGraphJson(ChainWatcher watcher)
+        private static string BuildChainGraphJson(ChainWatcher watcher, NodeNetwork network)
         {
             var lastAudit = watcher.LastSnapshot;
             var rawBlocks = lastAudit?.ChainGraph ?? new List<ChainGraphBlock>();
-            var tipHashes = new HashSet<string>((lastAudit?.Tips ?? new List<TipGroup>()).Select(t => t.TipHash));
+            var tips = lastAudit?.Tips ?? new List<TipGroup>();
+            var tipsByHash = tips.ToDictionary(t => t.TipHash);
+            var (hashPowerByNodeId, totalHashPower, validatedNodeCount) = ComputeInfluenceContext(network.GetSnapshot(), lastAudit);
 
             var pruned = PruneUngrownForkStubs(rawBlocks);
             var lanes = AssignLanes(pruned);
@@ -218,15 +232,28 @@ namespace BitcoinNetworkSimulator
 
             var maxSeenOnNodes = pruned.Count == 0 ? 1 : Math.Max(1, pruned.Max(b => b.NodeIds.Count));
 
-            DashboardChainSegmentBlock ToBlockDto(ChainGraphBlock b) => new()
+            DashboardChainSegmentBlock ToBlockDto(ChainGraphBlock b)
             {
-                Hash = b.Hash,
-                Height = b.Height,
-                BuiltBy = b.BuiltBy,
-                NodeIds = b.NodeIds,
-                IsTip = tipHashes.Contains(b.Hash),
-                IsShared = b.NodeIds.Count >= maxSeenOnNodes
-            };
+                double? nodeShare = null, hashPowerShare = null;
+                if (tipsByHash.TryGetValue(b.Hash, out var tip))
+                {
+                    var hashPower = tip.NodeIds.Sum(id => hashPowerByNodeId.GetValueOrDefault(id, 0));
+                    nodeShare = (double)tip.NodeIds.Count / validatedNodeCount;
+                    hashPowerShare = (double)hashPower / totalHashPower;
+                }
+
+                return new DashboardChainSegmentBlock
+                {
+                    Hash = b.Hash,
+                    Height = b.Height,
+                    BuiltBy = b.BuiltBy,
+                    NodeIds = b.NodeIds,
+                    IsTip = tipsByHash.ContainsKey(b.Hash),
+                    IsShared = b.NodeIds.Count >= maxSeenOnNodes,
+                    NodeShare = nodeShare,
+                    HashPowerShare = hashPowerShare
+                };
+            }
 
             var graph = new DashboardChainGraph
             {
@@ -499,6 +526,8 @@ namespace BitcoinNetworkSimulator
             public List<string> NodeIds { get; init; } = new();
             public bool IsTip { get; init; }
             public bool IsShared { get; init; }
+            public double? NodeShare { get; init; }
+            public double? HashPowerShare { get; init; }
         }
 
         private sealed class DashboardChainSegment
@@ -882,7 +911,7 @@ function renderChainGraph(graph) {
   if (!graph || !graph.segments.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
 
   var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 10;
-  var width = marginL + graph.totalColumns * colW + 16;
+  var width = marginL + graph.totalColumns * colW + 140;
   var height = marginT + graph.laneCount * rowH + marginB;
 
   function xOf(col) { return marginL + col * colW + colW / 2; }
@@ -891,16 +920,31 @@ function renderChainGraph(graph) {
   var segById = {};
   graph.segments.forEach(function (s) { segById[s.id] = s; });
 
-  var lines = '', dots = '';
+  // Every lane gets its own stable, well-separated hue (golden-angle spacing), so a branch's
+  // dots and connecting lines stay one consistent color from where it splits off to its tip —
+  // the only way to tell two simultaneously-live chains apart at a glance.
+  function laneColor(lane) { return 'hsl(' + ((lane * 137.508) % 360).toFixed(0) + ', 62%, 58%)'; }
+
+  var lines = '', dots = '', labels = '';
 
   function renderBlockDot(b, col, lane) {
-    var fill = b.isTip ? 'var(--accent)' : (b.isShared ? 'var(--good)' : 'var(--warn)');
+    var color = laneColor(lane);
     var r = b.isTip ? 7 : 5;
+    var opacity = b.isTip || b.isShared ? 1 : 0.6;
     var title = 'height ' + b.height + '\nbuilt by ' + b.builtBy + '\n' + b.hash + '\n' +
       b.nodeIds.length + ' node(s): ' + b.nodeIds.join(', ');
+    if (b.isTip && b.nodeShare != null) {
+      title += '\n' + fmtPct(b.nodeShare) + ' of nodes, ' + fmtPct(b.hashPowerShare) + ' of hash power';
+    }
     var x = xOf(col), y = yOf(lane);
-    dots += '<circle cx=""' + x + '"" cy=""' + y + '"" r=""' + r + '"" fill=""' + fill +
-      '"" stroke=""var(--bg)"" stroke-width=""1.5""><title>' + escapeHtml(title) + '</title></circle>';
+    dots += '<circle cx=""' + x + '"" cy=""' + y + '"" r=""' + r + '"" fill=""' + color + '"" opacity=""' + opacity +
+      '"" stroke=""' + (b.isTip ? 'var(--text)' : 'var(--bg)') + '"" stroke-width=""' + (b.isTip ? 2 : 1.5) +
+      '""><title>' + escapeHtml(title) + '</title></circle>';
+    if (b.isTip && b.nodeShare != null) {
+      var label = fmtPct(b.nodeShare) + ' nodes · ' + fmtPct(b.hashPowerShare) + ' hash';
+      labels += '<text x=""' + (x + r + 5) + '"" y=""' + (y + 3.5) + '"" font-size=""10"" fill=""' + color +
+        '"" text-anchor=""start"">' + escapeHtml(label) + '</text>';
+    }
     return { x: x, y: y };
   }
 
@@ -910,13 +954,14 @@ function renderChainGraph(graph) {
     var title = count + ' block(s) hidden (height ' + range + ', no forks)';
     var fontSize = count >= 100 ? 8 : 9;
     dots += '<g><title>' + escapeHtml(title) + '</title>' +
-      '<circle cx=""' + x + '"" cy=""' + y + '"" r=""9"" fill=""var(--bar-bg)"" stroke=""var(--panel-border)"" stroke-width=""1.5"" />' +
+      '<circle cx=""' + x + '"" cy=""' + y + '"" r=""9"" fill=""var(--bar-bg)"" stroke=""' + laneColor(lane) + '"" stroke-width=""1.5"" />' +
       '<text x=""' + x + '"" y=""' + y + '"" font-size=""' + fontSize + '"" fill=""var(--text-dim)"" text-anchor=""middle"" dominant-baseline=""central"">' + count + '</text>' +
       '</g>';
     return { x: x, y: y };
   }
 
   graph.segments.forEach(function (seg) {
+    var color = laneColor(seg.lane);
     var points;
     if (seg.collapsed) {
       points = [
@@ -929,25 +974,25 @@ function renderChainGraph(graph) {
     }
     for (var i = 1; i < points.length; i++) {
       lines += '<line x1=""' + points[i - 1].x + '"" y1=""' + points[i - 1].y + '"" x2=""' + points[i].x + '"" y2=""' + points[i].y +
-        '"" stroke=""var(--panel-border)"" stroke-width=""2""' + (seg.collapsed ? ' stroke-dasharray=""4,3""' : '') + ' />';
+        '"" stroke=""' + color + '"" stroke-width=""2""' + (seg.collapsed ? ' stroke-dasharray=""4,3""' : '') + ' />';
     }
 
     if (seg.parentId !== null && seg.parentId !== undefined) {
       var parentSeg = segById[seg.parentId];
       var parentCol = parentSeg.collapsed ? parentSeg.startCol + 2 : parentSeg.startCol + parentSeg.blocks.length - 1;
       lines += '<line x1=""' + xOf(parentCol) + '"" y1=""' + yOf(parentSeg.lane) + '"" x2=""' + points[0].x +
-        '"" y2=""' + points[0].y + '"" stroke=""var(--panel-border)"" stroke-width=""2"" />';
+        '"" y2=""' + points[0].y + '"" stroke=""' + color + '"" stroke-width=""2"" />';
     }
   });
 
   var svg = '<svg width=""' + width + '"" height=""' + height + '"" viewBox=""0 0 ' + width + ' ' + height + '"">' +
-    lines + dots + '</svg>';
+    lines + dots + labels + '</svg>';
 
   container.innerHTML = '<div class=""chain-graph-wrap"">' + svg + '</div>' +
     '<div class=""chain-graph-legend"">' +
-    '<span><span class=""dot"" style=""background:var(--accent)""></span>current tip</span>' +
-    '<span><span class=""dot"" style=""background:var(--good)""></span>shared by all observed nodes</span>' +
-    '<span><span class=""dot"" style=""background:var(--warn)""></span>minority / orphaned branch</span>' +
+    '<span>each color is one currently-live branch</span>' +
+    '<span>larger, ringed dot = that branch’s tip — labeled with its share of nodes and hash power</span>' +
+    '<span>faded dot = minority/orphaned block, not the tip of any lane</span>' +
     '<span><span class=""dot"" style=""background:var(--bar-bg); border:1px solid var(--panel-border)""></span>N blocks compressed (no forks in between) &#8212; hover any dot for height/details</span>' +
     '</div>';
 }
