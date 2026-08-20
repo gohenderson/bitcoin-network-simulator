@@ -223,12 +223,14 @@ namespace BitcoinNetworkSimulator
             var rawBlocks = lastAudit?.ChainGraph ?? new List<ChainGraphBlock>();
             var tips = lastAudit?.Tips ?? new List<TipGroup>();
             var tipsByHash = tips.ToDictionary(t => t.TipHash);
+            var tipHashSet = new HashSet<string>(tipsByHash.Keys);
             var (hashPowerByNodeId, totalHashPower, validatedNodeCount) = ComputeInfluenceContext(network.GetSnapshot(), lastAudit);
 
-            var pruned = PruneUngrownForkStubs(rawBlocks);
-            var lanes = AssignLanes(pruned);
+            var pruned = PruneUngrownForkStubs(rawBlocks, tipHashSet);
+            var lanes = AssignLanes(pruned, tipHashSet);
             var segments = BuildChainSegments(pruned);
             AssignSegmentColumns(segments);
+            AlignLeafTips(segments);
 
             var maxSeenOnNodes = pruned.Count == 0 ? 1 : Math.Max(1, pruned.Max(b => b.NodeIds.Count));
 
@@ -262,7 +264,13 @@ namespace BitcoinNetworkSimulator
                 LaneCount = lanes.LaneCount,
                 Segments = segments.Select(seg =>
                 {
-                    var visible = seg.Collapsed ? new List<ChainGraphBlock> { seg.Blocks[0], seg.Blocks[^1] } : seg.Blocks;
+                    var hiddenStart = 1 + seg.ExtraShownPrefixCount;
+                    var visible = seg.Collapsed
+                        ? new List<ChainGraphBlock> { seg.Blocks[0] }
+                            .Concat(seg.Blocks.Skip(1).Take(seg.ExtraShownPrefixCount))
+                            .Append(seg.Blocks[^1])
+                            .ToList()
+                        : seg.Blocks;
                     return new DashboardChainSegment
                     {
                         Id = seg.Id,
@@ -272,8 +280,8 @@ namespace BitcoinNetworkSimulator
                         EndCol = seg.EndCol,
                         Collapsed = seg.Collapsed,
                         Blocks = visible.Select(ToBlockDto).ToList(),
-                        HiddenCount = seg.Collapsed ? seg.Blocks.Count - 2 : 0,
-                        HiddenFromHeight = seg.Collapsed ? seg.Blocks[1].Height : (int?)null,
+                        HiddenCount = seg.Collapsed ? seg.Blocks.Count - 1 - hiddenStart : 0,
+                        HiddenFromHeight = seg.Collapsed ? seg.Blocks[hiddenStart].Height : (int?)null,
                         HiddenToHeight = seg.Collapsed ? seg.Blocks[^2].Height : (int?)null
                     };
                 }).ToList()
@@ -290,16 +298,20 @@ namespace BitcoinNetworkSimulator
 
         /// <summary>
         /// Greedily continues a lane when a block's parent is the current tip of that lane.
-        /// A lane whose block turns out to have no children anywhere in the set is freed once
-        /// every block at that same height has had a chance to look for its own parent's tip,
-        /// so a later fork reuses the lowest free lane instead of always growing outward —
-        /// otherwise its connecting line would have to visually jump past an already-dead
-        /// lane's row to reach a new one further out. Freeing must wait for the whole height
-        /// group: two siblings forking from the very same parent only differ by which of them
-        /// still finds that parent's tip in place, and freeing mid-group would erase it before
-        /// the second sibling gets its turn, corrupting both onto the same lane.
+        /// A lane whose block turns out to have no children anywhere in the set, and isn't
+        /// itself a currently-live tip, is freed once every block at that same height has had
+        /// a chance to look for its own parent's tip, so a later fork reuses the lowest free
+        /// lane instead of always growing outward — otherwise its connecting line would have
+        /// to visually jump past an already-dead lane's row to reach a new one further out.
+        /// Freeing must wait for the whole height group: two siblings forking from the very
+        /// same parent only differ by which of them still finds that parent's tip in place,
+        /// and freeing mid-group would erase it before the second sibling gets its turn,
+        /// corrupting both onto the same lane. A currently-live tip is never freed even though
+        /// it has no children yet — it may still grow a child on the very next block, and
+        /// reusing its lane for an unrelated branch in the meantime would make two
+        /// simultaneously-live branches render in the same lane color.
         /// </summary>
-        private static LaneAssignment AssignLanes(List<ChainGraphBlock> blocks)
+        private static LaneAssignment AssignLanes(List<ChainGraphBlock> blocks, HashSet<string> tipHashes)
         {
             var childCount = new Dictionary<string, int>();
             foreach (var b in blocks)
@@ -330,7 +342,7 @@ namespace BitcoinNetworkSimulator
 
                 foreach (var (b, lane) in placed)
                 {
-                    if (!childCount.ContainsKey(b.Hash))
+                    if (!childCount.ContainsKey(b.Hash) && !tipHashes.Contains(b.Hash))
                         laneTip[lane] = null;
                 }
             }
@@ -346,11 +358,11 @@ namespace BitcoinNetworkSimulator
         /// for the tallest is kept regardless of length, since it may simply not have had a
         /// chance to grow yet.
         /// </summary>
-        private static List<ChainGraphBlock> PruneUngrownForkStubs(List<ChainGraphBlock> blocks)
+        private static List<ChainGraphBlock> PruneUngrownForkStubs(List<ChainGraphBlock> blocks, HashSet<string> tipHashes)
         {
             if (blocks.Count == 0) return blocks;
 
-            var lanes = AssignLanes(blocks);
+            var lanes = AssignLanes(blocks, tipHashes);
             var byLane = new Dictionary<int, List<ChainGraphBlock>>();
             foreach (var b in blocks)
             {
@@ -382,6 +394,13 @@ namespace BitcoinNetworkSimulator
             public int Span { get; set; }
             public int StartCol { get; set; }
             public int EndCol { get; set; }
+            /// <summary>
+            /// How many blocks right after the first one are shown individually instead of
+            /// folded into the hidden-count gap — see <see cref="AlignLeafTips"/>. Zero for
+            /// every segment except a tip segment stretched to reach the tree's common tip
+            /// column.
+            /// </summary>
+            public int ExtraShownPrefixCount { get; set; }
         }
 
         /// <summary>
@@ -470,6 +489,44 @@ namespace BitcoinNetworkSimulator
                     child.StartCol = seg.EndCol + 1;
                     queue.Enqueue(child);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Stretches every tip segment (one per currently-live branch, since a tip is always
+        /// its own segment's last block) out to the same end column as whichever branch's tip
+        /// naturally lands furthest right, so every tip lines up in one vertical column instead
+        /// of trailing off at whatever column its own history happened to reach. A stretched
+        /// segment first reveals more of its real blocks instead of folding them into the
+        /// hidden-count gap — never invents blocks that don't exist — and only once every real
+        /// block is already shown does the tip itself simply render at the shared column, with
+        /// a plain, dot-free line covering whatever distance no real block ever filled. Only
+        /// tip segments move; a fork point's column stays exactly where the fork actually
+        /// happened.
+        /// </summary>
+        private static void AlignLeafTips(List<ChainSegment> segments)
+        {
+            var leaves = segments.Where(s => s.Children.Count == 0).ToList();
+            if (leaves.Count == 0) return;
+
+            var targetCol = leaves.Max(s => s.EndCol);
+            foreach (var seg in leaves)
+            {
+                if (seg.EndCol >= targetCol) continue;
+
+                var neededSpan = targetCol - seg.StartCol + 1;
+                if (neededSpan >= seg.Blocks.Count)
+                {
+                    seg.Collapsed = false;
+                    seg.ExtraShownPrefixCount = 0;
+                    seg.Span = seg.Blocks.Count;
+                }
+                else
+                {
+                    seg.ExtraShownPrefixCount = neededSpan - 3;
+                    seg.Span = neededSpan;
+                }
+                seg.EndCol = targetCol;
             }
         }
 
@@ -908,13 +965,19 @@ function escapeHtml(s) {
 // The server (Dashboard.BuildChainGraphJson) already pruned ungrown fork stubs, split the
 // remaining blocks into segments, and assigned each one a column and lane — this is a pure
 // renderer over that pre-collapsed shape, never the raw block-per-height data.
+var _labelMeasureCtx = document.createElement('canvas').getContext('2d');
+function measureLabelWidth(text, font) {
+  _labelMeasureCtx.font = font;
+  return _labelMeasureCtx.measureText(text).width;
+}
+
 function renderChainGraph(graph) {
   var container = document.getElementById('chain-graph');
   if (!graph || !graph.segments.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
 
   var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 10;
-  var width = marginL + graph.totalColumns * colW + 220;
   var height = marginT + graph.laneCount * rowH + marginB;
+  var maxLabelRight = 0;
 
   function xOf(col) { return marginL + col * colW + colW / 2; }
   function yOf(lane) { return marginT + lane * rowH + rowH / 2; }
@@ -945,10 +1008,18 @@ function renderChainGraph(graph) {
       '""><title>' + escapeHtml(title) + '</title></circle>';
     if (b.isTip && b.nodeShare != null) {
       var label = (b.ruleName ? b.ruleName + ' — ' : '') + fmtPct(b.nodeShare) + ' nodes · ' + fmtPct(b.hashPowerShare) + ' hash';
-      labels += '<text x=""' + (x + r + 5) + '"" y=""' + (y + 3.5) + '"" font-size=""10"" fill=""' + color +
+      var font = '10px -apple-system, BlinkMacSystemFont, ""Segoe UI"", Helvetica, Arial, sans-serif';
+      var textW = measureLabelWidth(label, font);
+      var padX = 6, pillH = 16;
+      var pillX = x + r + 5, pillY = y - pillH / 2;
+      var pillW = textW + padX * 2;
+      labels += '<rect x=""' + pillX + '"" y=""' + pillY + '"" width=""' + pillW + '"" height=""' + pillH +
+        '"" rx=""' + (pillH / 2) + '"" fill=""var(--bar-bg)"" stroke=""' + color + '"" stroke-width=""1"" />' +
+        '<text x=""' + (pillX + padX) + '"" y=""' + (y + 3.5) + '"" font-size=""10"" fill=""' + color +
         '"" text-anchor=""start"">' + escapeHtml(label) + '</text>';
+      maxLabelRight = Math.max(maxLabelRight, pillX + pillW);
     }
-    return { x: x, y: y };
+    return { x: x, y: y, col: col };
   }
 
   function renderGapDot(count, fromHeight, toHeight, col, lane) {
@@ -960,24 +1031,37 @@ function renderChainGraph(graph) {
       '<circle cx=""' + x + '"" cy=""' + y + '"" r=""9"" fill=""var(--bar-bg)"" stroke=""' + laneColor(lane) + '"" stroke-width=""1.5"" />' +
       '<text x=""' + x + '"" y=""' + y + '"" font-size=""' + fontSize + '"" fill=""var(--text-dim)"" text-anchor=""middle"" dominant-baseline=""central"">' + count + '</text>' +
       '</g>';
-    return { x: x, y: y };
+    return { x: x, y: y, col: col };
   }
 
   graph.segments.forEach(function (seg) {
     var color = laneColor(seg.lane);
     var points;
     if (seg.collapsed) {
-      points = [
-        renderBlockDot(seg.blocks[0], seg.startCol, seg.lane),
-        renderGapDot(seg.hiddenCount, seg.hiddenFromHeight, seg.hiddenToHeight, seg.startCol + 1, seg.lane),
-        renderBlockDot(seg.blocks[1], seg.startCol + 2, seg.lane)
-      ];
+      // seg.blocks holds [first, ...any extra blocks revealed to stretch this tip segment
+      // into column alignment with the tree's other tips, last] — the gap dot always sits
+      // right before the last one, however many extra blocks came before it.
+      var extraCount = seg.blocks.length - 2;
+      points = [renderBlockDot(seg.blocks[0], seg.startCol, seg.lane)];
+      for (var e = 0; e < extraCount; e++) {
+        points.push(renderBlockDot(seg.blocks[1 + e], seg.startCol + 1 + e, seg.lane));
+      }
+      points.push(renderGapDot(seg.hiddenCount, seg.hiddenFromHeight, seg.hiddenToHeight, seg.startCol + 1 + extraCount, seg.lane));
+      points.push(renderBlockDot(seg.blocks[seg.blocks.length - 1], seg.startCol + 2 + extraCount, seg.lane));
     } else {
-      points = seg.blocks.map(function (b, i) { return renderBlockDot(b, seg.startCol + i, seg.lane); });
+      // A tip segment stretched to reach the tree's shared tip column can run out of real
+      // blocks before it gets there — rather than inventing dots, the last (tip) block just
+      // renders at the shared column directly, leaving a plain, dot-free line to cover the
+      // distance no real block ever filled.
+      var lastIdx = seg.blocks.length - 1;
+      points = seg.blocks.map(function (b, i) {
+        return renderBlockDot(b, i === lastIdx ? seg.endCol : seg.startCol + i, seg.lane);
+      });
     }
     for (var i = 1; i < points.length; i++) {
+      var dashed = seg.collapsed || (points[i].col - points[i - 1].col > 1);
       lines += '<line x1=""' + points[i - 1].x + '"" y1=""' + points[i - 1].y + '"" x2=""' + points[i].x + '"" y2=""' + points[i].y +
-        '"" stroke=""' + color + '"" stroke-width=""2""' + (seg.collapsed ? ' stroke-dasharray=""4,3""' : '') + ' />';
+        '"" stroke=""' + color + '"" stroke-width=""2""' + (dashed ? ' stroke-dasharray=""4,3""' : '') + ' />';
     }
 
     if (seg.parentId !== null && seg.parentId !== undefined) {
@@ -988,6 +1072,7 @@ function renderChainGraph(graph) {
     }
   });
 
+  var width = Math.max(marginL + graph.totalColumns * colW + 16, maxLabelRight + 10);
   var svg = '<svg width=""' + width + '"" height=""' + height + '"" viewBox=""0 0 ' + width + ' ' + height + '"">' +
     lines + dots + labels + '</svg>';
 

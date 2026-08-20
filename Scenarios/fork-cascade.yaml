@@ -1,0 +1,102 @@
+# yaml-language-server: $schema=./scenario.schema.json
+#
+# A single chain that forks, and then forks again off of its own forks, building a tree
+# three generations deep instead of the one-shot split in consensus-rule-switch.yaml:
+#
+#              (height 15)      (height 32)  a1   [leaf]
+#                   +-- a  -----+
+#                   |           +-- (height 48)  a2a  [leaf]
+#                   |           +-- (height 48)  a2b  [leaf]
+#   trunk --(0)-----+
+#                   +-- b  [leaf, never forks again]
+#                   |
+#                   +-- (height 22)
+#                        c  -----+-- (height 38)  c1  [leaf]
+#                                +-- (height 38)  c2  [leaf]
+#
+# Every node group is Honest and fixed from the start (no AutoGrowth) — the only thing
+# driving the tree's shape is each group's own RuleSchedule, exactly like
+# consensus-rule-switch.yaml's technique, just chained across several heights instead of
+# one. Two sibling rulesets are always given different HalvingIntervalBlocks values small
+# enough that at least one halving has already happened by the height they take effect, so
+# the very next block after a switch already claims a different coinbase reward than every
+# other currently-live branch — an immediate, guaranteed rejection in both directions, not
+# a coincidence that depends on real mining odds. Once a leaf ruleset takes effect, that
+# group never switches again, so all six leaves keep mining and growing for as long as the
+# run lasts — every fork shown is a real, permanent branch, not a stub that lost a race and
+# stopped.
+NodeRules:
+  - Name: trunk
+    HalvingIntervalBlocks: 210000
+  - Name: a
+    HalvingIntervalBlocks: 3
+  - Name: b
+    HalvingIntervalBlocks: 4
+  - Name: c
+    HalvingIntervalBlocks: 5
+  - Name: a1
+    HalvingIntervalBlocks: 7
+  - Name: a2a
+    HalvingIntervalBlocks: 9
+  - Name: a2b
+    HalvingIntervalBlocks: 11
+  - Name: c1
+    HalvingIntervalBlocks: 13
+  - Name: c2
+    HalvingIntervalBlocks: 6
+
+Phases:
+  - Description: >-
+      12 nodes, fixed, in six groups of two. All six start on "trunk" together. At height
+      15, two groups peel off to "a" and "b"; "b" never forks again. At height 22, a third
+      group (still on "trunk" until now) peels off to "c". At height 32, one of the two
+      "a" groups peels off again to "a1", leaving the other still on "a". At height 38, the
+      two "c" groups both leave "c" for "c1" and "c2". At height 48, the remaining "a" group
+      itself splits into "a2a" and "a2b". From then on, all six leaves (b, a1, a2a, a2b, c1,
+      c2) just keep mining their own ruleset forever, so the chain graph should settle into
+      six permanently live, permanently diverging branches — three of them forks off of
+      forks. This phase has no DurationSeconds, so the run never stops on its own; leave it
+      running to watch every branch keep extending.
+    AutoGrowth: false
+    NodeGroups:
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 15, RulesName: b }
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 15, RulesName: a }
+          - { FromHeight: 32, RulesName: a1 }
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 15, RulesName: a }
+          - { FromHeight: 48, RulesName: a2a }
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 15, RulesName: a }
+          - { FromHeight: 48, RulesName: a2b }
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 22, RulesName: c }
+          - { FromHeight: 38, RulesName: c1 }
+      - Count: 2
+        Role: Honest
+        HashPower: 20
+        RuleSchedule:
+          - { FromHeight: 0, RulesName: trunk }
+          - { FromHeight: 22, RulesName: c }
+          - { FromHeight: 38, RulesName: c2 }
