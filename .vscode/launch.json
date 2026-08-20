@@ -21,6 +21,7 @@
             "default": "",
             "options": [
                 { "label": "(none — default single-node start)", "value": "" },
+                { "label": "bitcoin-history", "value": "Scenarios/bitcoin-history.yaml" },
                 { "label": "consensus-rule-switch", "value": "Scenarios/consensus-rule-switch.yaml" },
                 { "label": "economic-hub-topology", "value": "Scenarios/economic-hub-topology.yaml" },
                 { "label": "hash-power-disparity", "value": "Scenarios/hash-power-disparity.yaml" },
