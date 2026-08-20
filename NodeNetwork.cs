@@ -355,7 +355,7 @@ namespace BitcoinNetworkSimulator
             {
                 cumulative += option.Percent;
                 if (roll < cumulative)
-                    return new List<RuleScheduleEntry> { new RuleScheduleEntry { FromHeight = 0, Rules = option.Rules } };
+                    return new List<RuleScheduleEntry> { new RuleScheduleEntry { FromHeight = 0, Rules = option.Rules, Name = option.Name } };
             }
             return new List<RuleScheduleEntry>();
         }

@@ -80,6 +80,7 @@ namespace BitcoinNetworkSimulator
     {
         public double Percent { get; set; } = 0;
         public ConsensusRules Rules { get; set; } = new();
+        public string? Name { get; set; }
     }
 
     /// <summary>
@@ -388,8 +389,10 @@ namespace BitcoinNetworkSimulator
                 return new ConsensusRules();
             }
 
+            string? ResolveName(string? rulesName) => rulesName != null && byName.ContainsKey(rulesName) ? rulesName : null;
+
             List<RuleScheduleEntry> ResolveSchedule(List<ScenarioRuleScheduleEntry> schedule) =>
-                schedule.Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName) }).ToList();
+                schedule.Select(entry => new RuleScheduleEntry { FromHeight = entry.FromHeight, Rules = ResolveOne(entry.RulesName), Name = ResolveName(entry.RulesName) }).ToList();
 
             List<ValueSeekingCandidate> ResolveValueSeekingCandidates(List<string> names)
             {
@@ -398,7 +401,7 @@ namespace BitcoinNetworkSimulator
                 {
                     if (string.IsNullOrWhiteSpace(name)) continue;
                     if (byName.TryGetValue(name, out var namedRules))
-                        result.Add(new ValueSeekingCandidate { Rules = namedRules, PriceSchedule = namedRules.PriceSchedule });
+                        result.Add(new ValueSeekingCandidate { Rules = namedRules, PriceSchedule = namedRules.PriceSchedule, Name = namedRules.Name });
                     else
                         Console.WriteLine($"[scenario] {path} references ValueSeekingCandidates '{name}', which isn't defined in NodeRules; skipping it");
                 }
@@ -434,7 +437,7 @@ namespace BitcoinNetworkSimulator
                     {
                         group.ResolvedRuleSchedule = new List<RuleScheduleEntry>
                         {
-                            new RuleScheduleEntry { FromHeight = 0, Rules = ResolveOne(group.RulesName) }
+                            new RuleScheduleEntry { FromHeight = 0, Rules = ResolveOne(group.RulesName), Name = ResolveName(group.RulesName) }
                         };
                     }
                 }
@@ -448,7 +451,8 @@ namespace BitcoinNetworkSimulator
                         .Select(option => new ResolvedDefaultRuleScheduleOption
                         {
                             Percent = Math.Max(0, option.Percent),
-                            Rules = ResolveOne(option.RulesName)
+                            Rules = ResolveOne(option.RulesName),
+                            Name = ResolveName(option.RulesName)
                         })
                         .ToList()
                 })

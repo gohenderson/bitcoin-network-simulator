@@ -251,7 +251,8 @@ namespace BitcoinNetworkSimulator
                     IsTip = tipsByHash.ContainsKey(b.Hash),
                     IsShared = b.NodeIds.Count >= maxSeenOnNodes,
                     NodeShare = nodeShare,
-                    HashPowerShare = hashPowerShare
+                    HashPowerShare = hashPowerShare,
+                    RuleName = network.ResolveNode(b.BuiltBy)?.Chain.RuleNameForHeight(b.Height)
                 };
             }
 
@@ -528,6 +529,7 @@ namespace BitcoinNetworkSimulator
             public bool IsShared { get; init; }
             public double? NodeShare { get; init; }
             public double? HashPowerShare { get; init; }
+            public string? RuleName { get; init; }
         }
 
         private sealed class DashboardChainSegment
@@ -911,7 +913,7 @@ function renderChainGraph(graph) {
   if (!graph || !graph.segments.length) { container.innerHTML = '<div class=""empty"">No blocks yet.</div>'; return; }
 
   var colW = 34, rowH = 26, marginL = 10, marginT = 14, marginB = 10;
-  var width = marginL + graph.totalColumns * colW + 140;
+  var width = marginL + graph.totalColumns * colW + 220;
   var height = marginT + graph.laneCount * rowH + marginB;
 
   function xOf(col) { return marginL + col * colW + colW / 2; }
@@ -933,6 +935,7 @@ function renderChainGraph(graph) {
     var opacity = b.isTip || b.isShared ? 1 : 0.6;
     var title = 'height ' + b.height + '\nbuilt by ' + b.builtBy + '\n' + b.hash + '\n' +
       b.nodeIds.length + ' node(s): ' + b.nodeIds.join(', ');
+    if (b.ruleName) title += '\nrules: ' + b.ruleName;
     if (b.isTip && b.nodeShare != null) {
       title += '\n' + fmtPct(b.nodeShare) + ' of nodes, ' + fmtPct(b.hashPowerShare) + ' of hash power';
     }
@@ -941,7 +944,7 @@ function renderChainGraph(graph) {
       '"" stroke=""' + (b.isTip ? 'var(--text)' : 'var(--bg)') + '"" stroke-width=""' + (b.isTip ? 2 : 1.5) +
       '""><title>' + escapeHtml(title) + '</title></circle>';
     if (b.isTip && b.nodeShare != null) {
-      var label = fmtPct(b.nodeShare) + ' nodes · ' + fmtPct(b.hashPowerShare) + ' hash';
+      var label = (b.ruleName ? b.ruleName + ' — ' : '') + fmtPct(b.nodeShare) + ' nodes · ' + fmtPct(b.hashPowerShare) + ' hash';
       labels += '<text x=""' + (x + r + 5) + '"" y=""' + (y + 3.5) + '"" font-size=""10"" fill=""' + color +
         '"" text-anchor=""start"">' + escapeHtml(label) + '</text>';
     }
@@ -991,7 +994,7 @@ function renderChainGraph(graph) {
   container.innerHTML = '<div class=""chain-graph-wrap"">' + svg + '</div>' +
     '<div class=""chain-graph-legend"">' +
     '<span>each color is one currently-live branch</span>' +
-    '<span>larger, ringed dot = that branch’s tip — labeled with its share of nodes and hash power</span>' +
+    '<span>larger, ringed dot = that branch’s tip — labeled with its ruleset name (if any) and its share of nodes and hash power</span>' +
     '<span>faded dot = minority/orphaned block, not the tip of any lane</span>' +
     '<span><span class=""dot"" style=""background:var(--bar-bg); border:1px solid var(--panel-border)""></span>N blocks compressed (no forks in between) &#8212; hover any dot for height/details</span>' +
     '</div>';

@@ -159,6 +159,8 @@ namespace BitcoinNetworkSimulator
     {
         public int FromHeight { get; set; } = 0;
         public ConsensusRules Rules { get; set; } = new();
+        /// <summary>The <see cref="NamedConsensusRules.Name"/> <see cref="Rules"/> was resolved from, or null for a hardcoded/unnamed default.</summary>
+        public string? Name { get; set; }
     }
 
     /// <summary>
@@ -180,6 +182,8 @@ namespace BitcoinNetworkSimulator
     {
         public ConsensusRules Rules { get; set; } = new();
         public List<PriceScheduleEntry> PriceSchedule { get; set; } = new();
+        /// <summary>The <see cref="NamedConsensusRules.Name"/> <see cref="Rules"/> was resolved from.</summary>
+        public string? Name { get; set; }
     }
 
     /// <summary>
@@ -206,7 +210,7 @@ namespace BitcoinNetworkSimulator
             _entries = new List<RuleScheduleEntry>();
             _hashPower = hashPower;
             _valueSeekingCandidates = candidates
-                .Select(c => new ValueSeekingCandidate { Rules = c.Rules, PriceSchedule = c.PriceSchedule.OrderBy(p => p.FromHeight).ToList() })
+                .Select(c => new ValueSeekingCandidate { Rules = c.Rules, PriceSchedule = c.PriceSchedule.OrderBy(p => p.FromHeight).ToList(), Name = c.Name })
                 .ToList();
             _debasementRatePerBlock = debasementRatePerBlock;
         }
@@ -225,6 +229,29 @@ namespace BitcoinNetworkSimulator
             {
                 if (entry.FromHeight > height) break;
                 active = entry.Rules;
+            }
+            return active;
+        }
+
+        /// <summary>
+        /// The <see cref="NamedConsensusRules.Name"/> behind whichever <see cref="ConsensusRules"/>
+        /// <see cref="RulesForHeight"/> would return, or null when that ruleset is unnamed
+        /// (hardcoded defaults, or a value-seeking node currently idle for lack of a
+        /// profitable candidate).
+        /// </summary>
+        public string? NameForHeight(int height)
+        {
+            if (_valueSeekingCandidates.Count > 0)
+            {
+                var (best, value, _, name) = BestCandidateAt(height);
+                return (best != null && value > 0m) ? name : null;
+            }
+
+            string? active = null;
+            foreach (var entry in _entries)
+            {
+                if (entry.FromHeight > height) break;
+                active = entry.Name;
             }
             return active;
         }
@@ -251,15 +278,16 @@ namespace BitcoinNetworkSimulator
 
         private ConsensusRules MostProfitableAt(int height)
         {
-            var (best, value, _) = BestCandidateAt(height);
+            var (best, value, _, _) = BestCandidateAt(height);
             return (best != null && value > 0m) ? best : new ConsensusRules();
         }
 
-        private (ConsensusRules? Rules, decimal Value, decimal Price) BestCandidateAt(int height)
+        private (ConsensusRules? Rules, decimal Value, decimal Price, string? Name) BestCandidateAt(int height)
         {
             ConsensusRules? best = null;
             var bestValue = 0m;
             var bestPrice = 0m;
+            string? bestName = null;
             var debasement = DebasementFactorAt(height);
             foreach (var candidate in _valueSeekingCandidates)
             {
@@ -271,9 +299,10 @@ namespace BitcoinNetworkSimulator
                     best = candidate.Rules;
                     bestValue = value;
                     bestPrice = price;
+                    bestName = candidate.Name;
                 }
             }
-            return (best, bestValue, bestPrice);
+            return (best, bestValue, bestPrice, bestName);
         }
 
         private static decimal PriceAt(List<PriceScheduleEntry> schedule, int height)
@@ -402,6 +431,9 @@ namespace BitcoinNetworkSimulator
         {
             get { lock (_lock) { return Blocks[^1]; } }
         }
+
+        /// <summary>This node's named ruleset at <paramref name="height"/> — see <see cref="RuleSchedule.NameForHeight"/>.</summary>
+        public string? RuleNameForHeight(int height) => _ruleSchedule.NameForHeight(height);
 
         /// <summary>Appends a block this node built itself, without re-validating it.</summary>
         public void AppendTrusting(Block block)
