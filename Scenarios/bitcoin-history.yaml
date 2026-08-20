@@ -1,0 +1,403 @@
+# yaml-language-server: $schema=./scenario.schema.json
+#
+# A best-effort dramatization of Bitcoin's real history, genesis to "today", compressed
+# into a short run. The real numbers — block heights, block times, difficulty, dollar
+# figures — don't matter and aren't meant to be accurate; only the RELATIVE shape of
+# events does: which era came before which, roughly how big each side of a fork ended up,
+# roughly how price and mining-cost pressure moved over time. 100 nodes stands in for "the
+# whole network" at every point in time; how many of them end up on a given chain after a
+# fork is meant to loosely track that fork's real relative adoption, not its literal count.
+#
+# One simplification worth being upfront about: every hard fork below is modeled as a new
+# node group joining with its own ConsensusRules from the very start, sharing only the
+# genesis block with the chain it "forked from" rather than a real prefix of pre-fork
+# history — see consensus-rule-switch.yaml for the alternative (small, same-phase,
+# height-based) fork technique this file doesn't use. That technique needs its fork height
+# to be reachable almost immediately, which only works cleanly for a fork introduced at the
+# very start of a phase; recreating Bitcoin's actual history needs forks landing at
+# specific, unpredictable points deep into an already-running chain, so this file leans on
+# a different, more robust mechanism instead — a fresh, genesis-only-shared chain — at the
+# cost of that one inaccuracy.
+NodeRules:
+  # The chain that survives to become "the" Bitcoin, start to finish. Every hard fork
+  # below breaks away from nodes running this ruleset.
+  - Name: bitcoin
+    RetargetIntervalBlocks: 50
+    TargetSecondsPerBlock: 30
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 8
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 150
+    MaxSupply: 2100000
+    PriceSchedule:
+      - { FromHeight: 0, Price: 0 }
+      - { FromHeight: 40, Price: 0.05 }
+      - { FromHeight: 90, Price: 5 }
+      - { FromHeight: 110, Price: 30 }
+      - { FromHeight: 130, Price: 2 }
+      - { FromHeight: 180, Price: 13 }
+      - { FromHeight: 220, Price: 150 }
+      - { FromHeight: 260, Price: 1100 }
+      - { FromHeight: 290, Price: 300 }
+      - { FromHeight: 340, Price: 230 }
+      - { FromHeight: 420, Price: 650 }
+      - { FromHeight: 480, Price: 900 }
+      - { FromHeight: 560, Price: 4000 }
+      - { FromHeight: 600, Price: 19700 }
+      - { FromHeight: 650, Price: 6900 }
+      - { FromHeight: 700, Price: 3200 }
+      - { FromHeight: 780, Price: 10000 }
+      - { FromHeight: 850, Price: 9000 }
+      - { FromHeight: 900, Price: 29000 }
+      - { FromHeight: 950, Price: 63000 }
+      - { FromHeight: 980, Price: 30000 }
+      - { FromHeight: 1010, Price: 69000 }
+      - { FromHeight: 1050, Price: 16500 }
+      - { FromHeight: 1100, Price: 42000 }
+      - { FromHeight: 1150, Price: 73000 }
+      - { FromHeight: 1200, Price: 100000 }
+  # August 2017: the block-size fight's other outcome — a permanent split demanding bigger
+  # blocks immediately instead of the segwit-then-maybe-later path. Same 21M-coin issuance
+  # schedule as bitcoin (that part was never actually in dispute), but a much smaller
+  # security budget (InitialDifficultyShift 6, easier) and a faster retarget cadence
+  # (RetargetIntervalBlocks 10) standing in for its real emergency-difficulty-adjustment
+  # algorithm.
+  - Name: bitcoin-cash
+    RetargetIntervalBlocks: 10
+    TargetSecondsPerBlock: 30
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 6
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 150
+    MaxSupply: 2100000
+    PriceSchedule:
+      - { FromHeight: 560, Price: 300 }
+      - { FromHeight: 600, Price: 2500 }
+      - { FromHeight: 650, Price: 500 }
+      - { FromHeight: 780, Price: 300 }
+      - { FromHeight: 900, Price: 250 }
+      - { FromHeight: 1050, Price: 100 }
+      - { FromHeight: 1200, Price: 350 }
+  # November 2018: a fork of bitcoin-cash itself, over how far to push block size and who
+  # controlled development — the "hash war". Deliberately given the weakest security of
+  # any chain in this file, matching its real reputation as the easiest of the three to
+  # attack.
+  - Name: bitcoin-sv
+    RetargetIntervalBlocks: 10
+    TargetSecondsPerBlock: 30
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 5
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 150
+    MaxSupply: 2100000
+    PriceSchedule:
+      - { FromHeight: 700, Price: 90 }
+      - { FromHeight: 780, Price: 60 }
+      - { FromHeight: 900, Price: 180 }
+      - { FromHeight: 1050, Price: 40 }
+      - { FromHeight: 1200, Price: 30 }
+  # 2015-2016: stands in for the competing miner-activated block-size-increase proposals
+  # (BIP 100/101/109/110, Bitcoin XT, Bitcoin Classic, Bitcoin Unlimited) that circulated
+  # during the block size wars but never won over enough of the network before SegWit
+  # activated. No PriceSchedule: the market never assigned it real value.
+  - Name: big-blocks-proposal
+    RetargetIntervalBlocks: 50
+    TargetSecondsPerBlock: 30
+    MinAdjustmentFactor: 0.25
+    MaxAdjustmentFactor: 4
+    InitialDifficultyShift: 7
+    InitialBlockReward: 50
+    HalvingIntervalBlocks: 150
+    MaxSupply: 2100000
+
+# Every organically-grown node (the "silent majority" AutoGrowth adds on top of the named
+# actors below) follows the bitcoin ruleset from the start, so it stays in consensus with
+# the explicit NodeGroups below rather than accidentally forking on its own.
+DefaultRuleSchedule:
+  - FromHeight: 0
+    RuleSchedules:
+      - { Percent: 100, RulesName: bitcoin }
+
+# Stands in for real-world dollar inflation across the whole story, eroding every $ figure
+# below (mining costs, living costs, PriceSchedule prices) at a steady compounding rate.
+DebasementRatePerBlock: 0.0005
+
+Phases:
+  - Description: >-
+      January 2009: Satoshi mines the Genesis Block. A near-total secret — one CPU, one
+      person, no market, no adversaries. AutoGrowth is on but glacial, matching how few
+      people even knew this existed yet.
+    DurationSeconds: 45
+    AutoGrowth: true
+    MaxNodes: 3
+    GrowthIntervalSeconds: 15
+    GrowthRate: 1.2
+    GrowthMaliciousFraction: 0
+    GrowthWalletOnlyFraction: 0
+    NodeGroups:
+      - Count: 1
+        Role: Honest
+        HashPower: 1
+        RulesName: bitcoin
+
+  - Description: >-
+      2009 into mid-2010: a small circle of cypherpunks and early adopters starts running
+      nodes alongside Satoshi, still CPU-mining, still worth nothing. Then, August 15 2010:
+      an integer-overflow bug (CVE-2010-5139) lets a single transaction mint over 184
+      billion BTC out of thin air in block 74638 — the closest thing Bitcoin has had to a
+      "print unlimited money" exploit. The Corruptor role below is this simulator's direct
+      mechanical analog: it mines a real block, then tampers with the coinbase amount
+      afterward. Watch the console reject it on both the recomputed-hash check and the
+      independently-computed-coinbase-reward check — the same two guarantees that let the
+      real network detect, patch, and orphan the exploited block within about five hours.
+    DurationSeconds: 45
+    MaxNodes: 6
+    NodeGroups:
+      - Count: 2
+        Role: Honest
+        HashPower: 1
+        RulesName: bitcoin
+      - Count: 1
+        Role: Corruptor
+        HashPower: 2
+        RulesName: bitcoin
+
+  - Description: >-
+      Mid-2010 into 2012: Mt. Gox (launched July 2010) becomes the first real, liquid
+      market — bitcoin trades for fractions of a cent, then a nickel, then climbs toward a
+      dollar. GPU mining arrives, pushing hash power well past what a CPU could do, modeled
+      here as new nodes joining with meaningfully higher HashPower than the genesis-era
+      stragglers who are still running what they started with. Growth is still slow but no
+      longer glacial.
+    DurationSeconds: 60
+    MaxNodes: 12
+    GrowthRate: 1.25
+    NodeGroups:
+      - Count: 3
+        Role: Honest
+        HashPower: 5
+        RulesName: bitcoin
+
+  - Description: >-
+      November 2012: the first halving cuts the block reward — watch the console's reward
+      figure drop once height crosses this ruleset's HalvingIntervalBlocks. Then March
+      2013: a database-compatibility limit between the old (v0.7) and new (v0.8) Bitcoin
+      Core quietly causes the two versions to accept different sets of blocks as valid — a
+      real, accidental chain split, resolved within hours once miners coordinated to revert
+      to the older, compatible chain. This simulator has no "revert by social coordination"
+      mechanic, so the Equivocator role stands in for it instead — the closest mechanical
+      analog available: a node briefly producing two competing, individually valid
+      histories from the same parent, forcing a real fork/reorg exactly like the
+      version-mismatch did, before the network moves on.
+    DurationSeconds: 55
+    MaxNodes: 18
+    NodeGroups:
+      - Count: 2
+        Role: Equivocator
+        HashPower: 5
+        RulesName: bitcoin
+
+  - Description: >-
+      2013: price rockets from double digits to over $1000 by November as mainstream press
+      notices for the first time. ASICs arrive and obsolete GPU mining almost overnight —
+      modeled as a jump in HashPower far beyond anything in earlier phases. Mining also
+      starts consolidating into pools rather than everyone hashing solo; ghash-io below
+      stands in for the real GHash.io pool, which grew large enough this same year to
+      worry the community about a single operator approaching a majority of the network's
+      hash power — at this phase's numbers, it actually crosses 50%.
+    DurationSeconds: 75
+    MaxNodes: 30
+    NodeGroups:
+      - Count: 4
+        Role: Honest
+        HashPower: 30
+        RulesName: bitcoin
+      - Count: 6
+        Role: Honest
+        HashPower: 35
+        Pool: ghash-io
+        RulesName: bitcoin
+
+  - Description: >-
+      February 2014: Mt. Gox, once handling most of the world's bitcoin trading, halts
+      withdrawals and collapses, having lost roughly 850,000 BTC — the price crashes and
+      confidence takes a real hit, modeled here as growth stalling (GrowthRate at its
+      floor) and a churn rate representing nodes/users walking away. Meanwhile ghash-io's
+      pool, unchanged since last phase, keeps its absolute size while new independent
+      capacity joins around it, pulling its share back under 50% — mirroring how the real
+      GHash.io never again approached the peak it crossed in July 2014 as the wider network
+      kept growing underneath it.
+    DurationSeconds: 60
+    MaxNodes: 30
+    GrowthRate: 1.0
+    ChurnIntervalSeconds: 20
+    ChurnRate: 0.05
+    ChurnMinNodes: 15
+    GrowthMaliciousFraction: 0.1
+    NodeGroups:
+      - Count: 3
+        Role: Honest
+        HashPower: 20
+        RulesName: bitcoin
+
+  - Description: >-
+      2015-2016: the market recovers and mining keeps industrializing — running a
+      competitive miner now means real capital and real electricity bills, not a GPU in a
+      bedroom, so mining nodes from here on are ValueSeeking and carry real
+      CostPerAttempt/CostOfLiving/HashPowerCost figures instead of mining for free. The
+      second halving lands partway through. This is also the heart of the real "block size
+      wars": BIP 100/101/109/110, Bitcoin XT, Bitcoin Classic, and Bitcoin Unlimited all
+      proposed larger blocks and all failed to win over enough of the network before SegWit
+      activated — big-blocks-proposal below is a stand-in for that whole family: a small
+      group that never gets another node added to it again, visibly shrinking in relative
+      share as everything else keeps growing around it.
+    DurationSeconds: 90
+    MaxNodes: 50
+    GrowthRate: 1.3
+    GrowthWalletOnlyFraction: 0.5
+    NodeGroups:
+      - Count: 5
+        Role: Honest
+        HashPower: 80
+        ValueSeeking: true
+        ValueSeekingCandidates: [bitcoin]
+        CostPerAttempt: 0.001
+        CostOfLiving: 0.5
+        StartingCapital: 50
+        HashPowerCost: 5
+        MaxHashPower: 300
+      - Count: 3
+        Role: Honest
+        HashPower: 10
+        RulesName: big-blocks-proposal
+
+  - Description: >-
+      August 2017: SegWit activates on the main chain, and hours later a minority splits
+      off entirely rather than accept it — Bitcoin Cash, demanding bigger blocks
+      immediately. bitcoin-cash below models that split; watch the console's target/
+      coinbase rejections start the moment it joins, and the watcher report settle into a
+      permanent DIVERGENCE rather than ever reconverging, same as the real chains. Not
+      every miner picked a side out of conviction — some genuinely chased whichever chain
+      paid better, hash power visibly swinging between BTC and BCH in the weeks around the
+      fork depending on relative price and difficulty. The mercenary group below is
+      ValueSeeking between both rulesets for exactly that reason.
+    DurationSeconds: 90
+    MaxNodes: 65
+    NodeGroups:
+      - Count: 5
+        Role: Honest
+        HashPower: 100
+        EconomicWeight: 3
+        ValueSeeking: true
+        ValueSeekingCandidates: [bitcoin]
+        CostPerAttempt: 0.002
+        CostOfLiving: 1
+        StartingCapital: 200
+        HashPowerCost: 8
+        MaxHashPower: 400
+      - Count: 8
+        Role: Honest
+        HashPower: 60
+        RulesName: bitcoin-cash
+      - Count: 4
+        Role: Honest
+        HashPower: 50
+        ValueSeeking: true
+        ValueSeekingCandidates: [bitcoin, bitcoin-cash]
+        CostPerAttempt: 0.002
+        CostOfLiving: 1
+        StartingCapital: 200
+        HashPowerCost: 8
+        MaxHashPower: 400
+
+  - Description: >-
+      2018: the post-ATH crash wipes out most of the 2017 rally's gains, and in November
+      Bitcoin Cash itself splits — Bitcoin SV breaking away over how aggressively to scale
+      and who controlled development, the so-called "hash war". bitcoin-sv is deliberately
+      the weakest chain in this file (InitialDifficultyShift 5), matching its real
+      reputation for being the easiest of the three to attack. Bear-market conditions also
+      bring out more bad actors relative to genuine growth (a higher malicious fraction,
+      slower growth) — the Impersonator role here is loose flavor for the wave of exchange
+      hacks and impersonation scams common in this era, not a literal historical event.
+    DurationSeconds: 75
+    MaxNodes: 70
+    GrowthRate: 1.1
+    GrowthMaliciousFraction: 0.15
+    NodeGroups:
+      - Count: 3
+        Role: Honest
+        HashPower: 20
+        RulesName: bitcoin-sv
+      - Count: 2
+        Role: Impersonator
+        HashPower: 10
+        RulesName: bitcoin
+
+  - Description: >-
+      2019-2021: publicly-traded companies and institutions start holding bitcoin directly
+      on their balance sheets, exchanges and custodians become structural hubs in the real
+      peer graph (a higher EconomicWeight here), and the third halving lands mid-phase.
+      Price runs from four figures to a new all-time high above $60,000 in 2021. Mining is
+      now fully industrial — costs step up again — and most new participants from here on
+      are wallet/exchange users rather than miners, matching how mining became a
+      specialized business most of the network was never part of.
+    DurationSeconds: 90
+    MaxNodes: 90
+    GrowthRate: 1.35
+    GrowthWalletOnlyFraction: 0.75
+    GrowthMaliciousFraction: 0.08
+    NodeGroups:
+      - Count: 6
+        Role: Honest
+        HashPower: 150
+        EconomicWeight: 5
+        ValueSeeking: true
+        ValueSeekingCandidates: [bitcoin]
+        CostPerAttempt: 0.005
+        CostOfLiving: 5
+        StartingCapital: 1000
+        HashPowerCost: 20
+        MaxHashPower: 600
+
+  - Description: >-
+      2022: Terra/Luna and then FTX collapse, dragging price down from its 2021 highs and
+      shaking confidence across the whole market — a brief slowdown before recovery.
+      2023-2024 bring spot-ETF approval and a fourth halving; price climbs to fresh highs
+      into 2025-2026. By now mining is dominated by a handful of large, professionally-run
+      pools rather than any single operator threatening a majority — foundry-usa, antpool,
+      and f2pool below are named stand-ins for that modern, more-distributed-but-still-
+      pooled landscape, each group free to reconsider which pool it's in every turn. The
+      network settles at its full modern size and this phase never ends automatically —
+      this is "today".
+    MaxNodes: 100
+    GrowthRate: 1.2
+    GrowthWalletOnlyFraction: 0.8
+    GrowthMaliciousFraction: 0.06
+    NodeGroups:
+      - Count: 3
+        Role: Honest
+        HashPower: 200
+        EconomicWeight: 5
+        Pool: foundry-usa
+        PoolCandidates: [foundry-usa, antpool, f2pool]
+        PoolAdoptionThreshold: 0.5
+        RulesName: bitcoin
+      - Count: 3
+        Role: Honest
+        HashPower: 180
+        EconomicWeight: 5
+        Pool: antpool
+        PoolCandidates: [foundry-usa, antpool, f2pool]
+        PoolAdoptionThreshold: 0.5
+        RulesName: bitcoin
+      - Count: 2
+        Role: Honest
+        HashPower: 150
+        EconomicWeight: 5
+        Pool: f2pool
+        PoolCandidates: [foundry-usa, antpool, f2pool]
+        PoolAdoptionThreshold: 0.5
+        RulesName: bitcoin
