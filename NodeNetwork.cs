@@ -271,6 +271,7 @@ namespace BitcoinNetworkSimulator
             Func<string, int> getPoolHashPower = poolName => GetPoolHashPower(poolName);
             var soloMiner = new SoloMiner(id, DispatchInternalAsync, metadata.NodeRole, metadata.HashPower, metadata.CostPerAttempt, metadata.CostOfLiving, metadata.StartingCapital, requestForcedChurn, metadata.HashPowerCost, metadata.MaxHashPower, metadata.PoolCandidates, metadata.PoolAdoptionThreshold, metadata.Pool, getPoolHashPower, requestPoolSwitch, ruleSchedule, chain, mempool, getPeerIds, watcher, signingKey);
             var node = new Node(id, chain, mempool, watcher, DispatchInternalAsync, getPeerIds, discouragePeer);
+            chain.OnLineageSwitched = node.SeedForeignLineagePeers;
             var blockchainStore = new BlockchainStore(BlockchainDbPathFor(id));
             PersistenceLoop.ResumeFromDisk(node, blockchainStore);
 
@@ -424,6 +425,29 @@ namespace BitcoinNetworkSimulator
 
                 foreach (var id in toRemove)
                     RemoveNode(id, watcher);
+            }
+        }
+
+        private const int ForeignLineageGossipIntervalMs = 3000;
+
+        /// <summary>
+        /// Every tick, has every currently-live node refresh its own per-lineage peer lists
+        /// — see <see cref="Node.RefreshForeignLineagePeersAsync"/>. Independent of mining,
+        /// growth, and churn: this is a minimal, peer-id-only gossip, never block/chain
+        /// content.
+        /// </summary>
+        public async Task ForeignLineageGossipLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try { await Task.Delay(ForeignLineageGossipIntervalMs, token); }
+                catch (OperationCanceledException) { break; }
+
+                List<Node> nodes;
+                lock (_lock) { nodes = new List<Node>(_allNodes); }
+
+                foreach (var node in nodes)
+                    await node.RefreshForeignLineagePeersAsync();
             }
         }
 

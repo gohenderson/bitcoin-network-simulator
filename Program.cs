@@ -93,6 +93,7 @@ namespace BitcoinNetworkSimulator
 
             var txTask = TransactionGenerator.RunAsync(network, Port, cts.Token);
             var watcherTask = watcher.RunAsync(cts.Token);
+            var foreignLineageGossipTask = network.ForeignLineageGossipLoopAsync(cts.Token);
 
             Console.WriteLine($"All nodes share http://localhost:{Port}/ — address one by id in the path.");
             Console.WriteLine($"Try: curl http://localhost:{Port}/{NodeNetwork.NodeNameFor(0)}/chain");
@@ -172,7 +173,7 @@ namespace BitcoinNetworkSimulator
             try
             {
                 await Task.WhenAll(
-                    new[] { miningTask, txTask, growthTask, churnTask, watcherTask }
+                    new[] { miningTask, txTask, growthTask, churnTask, watcherTask, foreignLineageGossipTask }
                     .Concat(network.SnapshotPersistTasks()));
             }
             catch (OperationCanceledException) { }

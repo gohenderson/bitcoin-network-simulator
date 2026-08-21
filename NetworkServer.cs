@@ -74,17 +74,19 @@ namespace BitcoinNetworkSimulator
         }
 
         /// <summary>
-        /// Splits "/000-alpha/chain" into node id "000-alpha" and the remaining route
-        /// "/chain" (defaulting to "/" when nothing follows the node id). A missing or
-        /// unrecognized node id is rejected here, before <see cref="Node.HandleRequestAsync"/>
-        /// ever sees the request.
+        /// Splits "/000-alpha/peersFor/real-bitcoin" into node id "000-alpha" and the
+        /// remaining route "/peersFor/real-bitcoin" (defaulting to "/" when nothing follows
+        /// the node id) — everything after the node id stays together, internal slashes
+        /// included, so a multi-segment route reaches <see cref="Node.HandleRequestAsync"/>
+        /// intact rather than being truncated to just its first segment. A missing or
+        /// unrecognized node id is rejected here, before that ever happens.
         /// </summary>
         private async Task DispatchAsync(HttpListenerContext ctx)
         {
             try
             {
                 var path = ctx.Request.Url?.AbsolutePath ?? "/";
-                var segments = path.Split('/', 3, StringSplitOptions.RemoveEmptyEntries);
+                var segments = path.Split('/', 2, StringSplitOptions.RemoveEmptyEntries);
 
                 if (segments.Length == 0)
                 {

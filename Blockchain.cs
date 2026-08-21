@@ -21,6 +21,15 @@ namespace BitcoinNetworkSimulator
         public string From { get; set; } = "";
         public string To { get; set; } = "";
         public decimal Amount { get; set; }
+        /// <summary>
+        /// The coin/asset this transaction spends — the sender's own declaration of intent,
+        /// required at every entry point. <see cref="Blockchain.ValidateChain"/> rejects a
+        /// block outright if a transaction's declared asset doesn't match that block's own
+        /// height-derived asset; ledger bookkeeping itself still derives asset from block
+        /// height, not this field, the same way a block's own self-declared
+        /// <see cref="Block.Rules"/> is checked against but never trusted for arithmetic.
+        /// </summary>
+        public string Asset { get; set; } = "";
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 
@@ -471,12 +480,44 @@ namespace BitcoinNetworkSimulator
     {
         private readonly object _lock = new();
         private readonly RuleSchedule _ruleSchedule;
+        private string _lastObservedLineage;
         public List<Block> Blocks { get; private set; } = new();
+
+        /// <summary>
+        /// Fires exactly once per actual change in this node's own active lineage (named
+        /// ruleset — see <see cref="RuleSchedule.NameForHeight"/>), with the outgoing lineage,
+        /// the incoming one, and the height the incoming one took effect at. Unnamed rulesets
+        /// use <see cref="Ledger.DefaultAssetName"/>.
+        /// </summary>
+        public Action<string, string, int>? OnLineageSwitched;
 
         public Blockchain(RuleSchedule? ruleSchedule = null)
         {
             _ruleSchedule = ruleSchedule ?? new RuleSchedule(Enumerable.Empty<RuleScheduleEntry>(), 0m);
             Blocks.Add(CreateGenesisBlock());
+            _lastObservedLineage = RuleNameForHeight(0) ?? Ledger.DefaultAssetName;
+        }
+
+        /// <summary>
+        /// Compares the current tip's lineage against the last-observed one, firing
+        /// <see cref="OnLineageSwitched"/> on a change. Called after <see cref="Blocks"/> has
+        /// already been updated, and always outside <see cref="_lock"/> — it only takes the
+        /// lock itself, briefly, to read the comparison state.
+        /// </summary>
+        private void CheckLineageSwitch()
+        {
+            string oldLineage;
+            string newLineage;
+            int atHeight;
+            lock (_lock)
+            {
+                atHeight = Blocks[^1].Index;
+                newLineage = RuleNameForHeight(atHeight) ?? Ledger.DefaultAssetName;
+                if (newLineage == _lastObservedLineage) return;
+                oldLineage = _lastObservedLineage;
+                _lastObservedLineage = newLineage;
+            }
+            OnLineageSwitched?.Invoke(oldLineage, newLineage, atHeight);
         }
 
         private static Block CreateGenesisBlock()
@@ -515,6 +556,7 @@ namespace BitcoinNetworkSimulator
             {
                 Blocks.Add(block);
             }
+            CheckLineageSwitch();
         }
 
         private static (bool Ok, string Reason) ValidateChain(List<Block> candidate, Func<int, ConsensusRules> rulesForHeight, Func<int, string?> ruleNameForHeight)
@@ -598,6 +640,10 @@ namespace BitcoinNetworkSimulator
                     if (tx.Amount <= 0)
                         return (false, $"block #{block.Index} contains a non-positive transaction amount: {tx.Amount}");
 
+                    if (tx.Asset != asset)
+                        return (false, $"block #{block.Index} contains a transaction declaring asset '{tx.Asset}', " +
+                            $"which does not match this block's own active asset '{asset}'");
+
                     if (tx.From == Economics.CoinbaseSender)
                     {
                         balances[(tx.To, asset)] = balances.GetValueOrDefault((tx.To, asset)) + tx.Amount;
@@ -639,23 +685,30 @@ namespace BitcoinNetworkSimulator
         /// </summary>
         public (bool Ok, string Reason, bool AttributableToSender) TryAppend(Block block)
         {
-            lock (_lock)
+            var result = AppendLocked();
+            if (result.Ok) CheckLineageSwitch();
+            return result;
+
+            (bool Ok, string Reason, bool AttributableToSender) AppendLocked()
             {
-                var tip = Blocks[^1];
+                lock (_lock)
+                {
+                    var tip = Blocks[^1];
 
-                if (block.Index != tip.Index + 1)
-                    return (false, $"expected index {tip.Index + 1}, got {block.Index}", false);
+                    if (block.Index != tip.Index + 1)
+                        return (false, $"expected index {tip.Index + 1}, got {block.Index}", false);
 
-                if (block.PreviousHash != tip.Hash)
-                    return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}", false);
+                    if (block.PreviousHash != tip.Hash)
+                        return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}", false);
 
-                var candidate = new List<Block>(Blocks) { block };
-                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
-                if (!validation.Ok)
-                    return (false, validation.Reason, true);
+                    var candidate = new List<Block>(Blocks) { block };
+                    var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
+                    if (!validation.Ok)
+                        return (false, validation.Reason, true);
 
-                Blocks.Add(block);
-                return (true, "ok", false);
+                    Blocks.Add(block);
+                    return (true, "ok", false);
+                }
             }
         }
 
@@ -665,20 +718,27 @@ namespace BitcoinNetworkSimulator
         /// </summary>
         public (bool Replaced, string Reason, bool AttributableToSender) TryReplaceWithLongerChain(List<Block> candidate)
         {
-            lock (_lock)
+            var result = ReplaceLocked();
+            if (result.Replaced) CheckLineageSwitch();
+            return result;
+
+            (bool Replaced, string Reason, bool AttributableToSender) ReplaceLocked()
             {
-                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
-                if (!validation.Ok)
-                    return (false, $"candidate rejected: {validation.Reason}", true);
+                lock (_lock)
+                {
+                    var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
+                    if (!validation.Ok)
+                        return (false, $"candidate rejected: {validation.Reason}", true);
 
-                if (candidate.Count <= Blocks.Count)
-                    return (false, $"candidate is not longer (candidate={candidate.Count - 1}, local={Blocks.Count - 1})", false);
+                    if (candidate.Count <= Blocks.Count)
+                        return (false, $"candidate is not longer (candidate={candidate.Count - 1}, local={Blocks.Count - 1})", false);
 
-                if (candidate[0].Hash != Blocks[0].Hash)
-                    return (false, "candidate has a different genesis block", true);
+                    if (candidate[0].Hash != Blocks[0].Hash)
+                        return (false, "candidate has a different genesis block", true);
 
-                Blocks = new List<Block>(candidate);
-                return (true, $"replaced local chain with longer chain at height {Blocks[^1].Index}", false);
+                    Blocks = new List<Block>(candidate);
+                    return (true, $"replaced local chain with longer chain at height {Blocks[^1].Index}", false);
+                }
             }
         }
 

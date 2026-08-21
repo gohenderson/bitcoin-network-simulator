@@ -196,15 +196,26 @@ namespace BitcoinNetworkSimulator
 
         /// <summary>
         /// Simulates including <paramref name="candidates"/> in order against a starting
-        /// balance snapshot, dropping (and logging) any transaction its sender can't actually
-        /// afford at that point. <paramref name="balances"/> is mutated in place so callers
-        /// can chain further inclusions on top of the result.
+        /// balance snapshot, dropping (and logging) any transaction that doesn't declare
+        /// <paramref name="asset"/> (the block being built's own active asset) or whose sender
+        /// can't actually afford it at that point. Defense in depth: nothing should ever reach
+        /// this mempool with a mismatched asset (<see cref="Node.TryAdmitTransaction"/> already
+        /// checks it at admission), but this file treats mempool content as untrusted input to
+        /// re-derive from, not something to assume. <paramref name="balances"/> is mutated in
+        /// place so callers can chain further inclusions on top of the result.
         /// </summary>
-        private List<Transaction> FilterAffordable(List<Transaction> candidates, Dictionary<string, decimal> balances)
+        private List<Transaction> FilterAffordable(List<Transaction> candidates, Dictionary<string, decimal> balances, string asset)
         {
             var accepted = new List<Transaction>();
             foreach (var tx in candidates)
             {
+                if (tx.Asset != asset)
+                {
+                    Console.WriteLine($"[{Id}] dropping mempool tx {tx.From}->{tx.To}:{tx.Amount} from this block — " +
+                        $"declares asset '{tx.Asset}', this block's active asset is '{asset}'");
+                    continue;
+                }
+
                 var available = balances.GetValueOrDefault(tx.From);
                 if (tx.Amount > available)
                 {
@@ -288,10 +299,10 @@ namespace BitcoinNetworkSimulator
             var txs = new List<Transaction>();
             if (reward > 0m)
             {
-                txs.Add(new Transaction { From = Economics.CoinbaseSender, To = builtBy, Amount = reward });
+                txs.Add(new Transaction { From = Economics.CoinbaseSender, To = builtBy, Amount = reward, Asset = currentAsset });
                 simulatedBalances[builtBy] = simulatedBalances.GetValueOrDefault(builtBy) + reward;
             }
-            txs.AddRange(FilterAffordable(pending, simulatedBalances));
+            txs.AddRange(FilterAffordable(pending, simulatedBalances, currentAsset));
 
             var block = MineBlock(parent, expectedTarget, rules, txs, builtBy, HashPower, token);
             if (block == null)
@@ -361,7 +372,7 @@ namespace BitcoinNetworkSimulator
 
             if (reward > 0m)
             {
-                txs.Add(new Transaction { From = Economics.CoinbaseSender, To = poolLabel, Amount = reward });
+                txs.Add(new Transaction { From = Economics.CoinbaseSender, To = poolLabel, Amount = reward, Asset = currentAsset });
                 simulatedBalances[poolLabel] = simulatedBalances.GetValueOrDefault(poolLabel) + reward;
 
                 var distributed = 0m;
@@ -375,13 +386,13 @@ namespace BitcoinNetworkSimulator
                     if (share <= 0m) continue;
                     distributed += share;
 
-                    txs.Add(new Transaction { From = poolLabel, To = member.Id, Amount = share });
+                    txs.Add(new Transaction { From = poolLabel, To = member.Id, Amount = share, Asset = currentAsset });
                     simulatedBalances[poolLabel] -= share;
                     simulatedBalances[member.Id] = simulatedBalances.GetValueOrDefault(member.Id) + share;
                 }
             }
 
-            txs.AddRange(FilterAffordable(pending, simulatedBalances));
+            txs.AddRange(FilterAffordable(pending, simulatedBalances, currentAsset));
 
             var block = MineBlock(parent, expectedTarget, rules, txs, Id, totalHashPower, token);
             if (block == null)
@@ -417,15 +428,15 @@ namespace BitcoinNetworkSimulator
             var expectedTarget = ProofOfWork.ComputeExpectedTargetHex(ancestors, rules);
             var reward = Economics.ComputeBlockReward(ancestors, height, rules);
 
+            var currentAsset = _ruleSchedule.NameForHeight(height) ?? Ledger.DefaultAssetName;
+            var byAsset = Ledger.ComputeBalancesByAsset(ancestors, _ruleSchedule.NameForHeight, height);
+
             var pending = new List<Transaction>();
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
             var half = pending.Count / 2;
             var restA = pending.Take(half).ToList();
             var restB = pending.Skip(half).ToList();
-            restB.Add(new Transaction { From = Id, To = "shadow-peer", Amount = 1m });
-
-            var currentAsset = _ruleSchedule.NameForHeight(height) ?? Ledger.DefaultAssetName;
-            var byAsset = Ledger.ComputeBalancesByAsset(ancestors, _ruleSchedule.NameForHeight, height);
+            restB.Add(new Transaction { From = Id, To = "shadow-peer", Amount = 1m, Asset = currentAsset });
 
             List<Transaction> BuildTxs(List<Transaction> rest)
             {
@@ -435,10 +446,10 @@ namespace BitcoinNetworkSimulator
                     .ToDictionary(kv => kv.Key.Account, kv => kv.Value);
                 if (reward > 0m)
                 {
-                    txs.Add(new Transaction { From = Economics.CoinbaseSender, To = Id, Amount = reward });
+                    txs.Add(new Transaction { From = Economics.CoinbaseSender, To = Id, Amount = reward, Asset = currentAsset });
                     simulatedBalances[Id] = simulatedBalances.GetValueOrDefault(Id) + reward;
                 }
-                txs.AddRange(FilterAffordable(rest, simulatedBalances));
+                txs.AddRange(FilterAffordable(rest, simulatedBalances, currentAsset));
                 return txs;
             }
 

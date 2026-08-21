@@ -42,12 +42,12 @@ simulator deliberately makes.
   that accepts a new block, chain, or pending transaction from one peer
   relays it on to its own other peers, so it still reaches the whole network
   hop by hop as long as the peer graph is connected. A transaction only ever
-  keeps propagating through peers whose own current ledger view can afford
-  it — a peer that can't (e.g. one on a different consensus-rules lineage)
-  just drops it there, silently and without discouraging whoever sent it,
-  since that's routine rather than provable misbehavior the way an invalid
-  block is. See `NodeNetwork.cs` and the "Peer topology" fields in
-  [Scenarios](scenarios.md).
+  keeps propagating through peers currently on the same lineage it declares
+  (`Transaction.Asset`) and whose own ledger view can afford it — a peer for
+  whom either isn't true just drops it there, silently and without
+  discouraging whoever sent it, since that's routine rather than provable
+  misbehavior the way an invalid block is. See `NodeNetwork.cs` and the
+  "Peer topology" fields in [Scenarios](scenarios.md).
 - **Peer discouragement.** Real Bitcoin nodes never compare consensus rules
   up front — there's no such field in the handshake — they discover a
   disagreement lazily, the first time a peer actually sends something that
@@ -76,15 +76,33 @@ simulator deliberately makes.
 - **Balances & double-spends.** Every account's balance is derived purely
   from chain history (`Ledger.ComputeBalancesByAsset`), separately per
   coin/asset — an asset is identified by the name of whichever
-  `RuleSchedule` entry was active at a given height. A block containing a
-  transaction that spends more than the sender's balance in that block's
-  own active asset, at that exact point in the chain, is rejected outright
-  — which transitively catches double-spends too. When a node's active
-  ruleset switches names from one height to the next (a hard fork — see
-  [Scenarios](scenarios.md)' `RuleSchedule`), every account's balance in
-  the outgoing asset is cloned into the new asset, so pre-fork coins remain
-  spendable as a balance of the new coin too, exactly as a real hard fork
-  splits one coin into two.
+  `RuleSchedule` entry was active at a given height. Every transaction
+  declares which asset it spends (`Transaction.Asset`), and a block is
+  rejected outright if that declaration doesn't match the block's own
+  height-derived asset, or if it spends more than the sender's balance in
+  that asset at that exact point in the chain — which transitively catches
+  double-spends too. When a node's active ruleset switches names from one
+  height to the next (a hard fork — see [Scenarios](scenarios.md)'
+  `RuleSchedule`), every account's balance in the outgoing asset is cloned
+  into the new asset, so pre-fork coins remain spendable as a balance of the
+  new coin too, exactly as a real hard fork splits one coin into two.
+- **Cross-lineage spending.** A node can spend a balance sitting on a
+  lineage it no longer shares consensus with — a dormant pre-fork coin, say
+  — via `POST /<node-id>/spendOnLineage`. Each node keeps a peer-id list per
+  lineage, completely separate from its one live gossip graph: the moment
+  its own active lineage switches away from one, it snapshots its current
+  peers under that outgoing lineage's name, then keeps that list fresh
+  afterward with a minimal, ongoing exchange of peer ids only
+  (`GET /<node-id>/peersFor/<lineage>`) that never touches that lineage's
+  actual blocks or chain — the node never validates or actually joins it.
+  A spend on a lineage it's still on is handled locally; otherwise it's
+  forwarded to a remembered peer's own `/tx`, which independently re-checks
+  the declared asset against its own current lineage. Because the peer list
+  is gossiped, not validated against any chain, a node has no way to tell
+  whether a peer id it learns this way is honest, current, or malicious, or
+  whether a peer that accepts a forwarded spend actually relays or mines it
+  — the same trust a wallet places in a third-party server it doesn't run
+  itself.
 - **Mining participation.** Mining is optional per node (`CanMine`). A
   wallet-only node is a completely normal network participant — it serves
   `/<node-id>/chain`, `/<node-id>/balances`, `/<node-id>/mempool`, validates

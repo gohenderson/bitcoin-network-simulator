@@ -22,6 +22,14 @@ namespace BitcoinNetworkSimulator
         Withholder
     }
 
+    /// <summary>Body of a <c>POST /&lt;node-id&gt;/spendOnLineage</c> request — see <see cref="Node.HandleAsync"/>.</summary>
+    public class SpendOnLineageRequest
+    {
+        public string Lineage { get; set; } = "";
+        public string To { get; set; } = "";
+        public decimal Amount { get; set; }
+    }
+
     /// <summary>
     /// An independent view of the chain and its own mempool of pending transactions. Owns
     /// everything about what a request does (validating and accepting what peers send it),
@@ -44,6 +52,16 @@ namespace BitcoinNetworkSimulator
         private readonly Func<List<string>> _getPeerIds;
         private readonly Action<string> _discouragePeer;
         private readonly ConcurrentDictionary<string, byte> _seenTransactionIds = new();
+
+        /// <summary>
+        /// This node's own peer ids per lineage other than whichever one it's currently on —
+        /// completely separate from <see cref="_getPeerIds"/>'s single live gossip graph
+        /// (full block/chain/tx relay, one lineage). Seeded the moment this node's own active
+        /// lineage switches away from one (<see cref="SeedForeignLineagePeers"/>) and kept
+        /// fresh afterward by <see cref="RefreshForeignLineagePeersAsync"/> — a minimal,
+        /// peer-id-only exchange that never validates or joins that lineage.
+        /// </summary>
+        private readonly ConcurrentDictionary<string, HashSet<string>> _foreignLineagePeers = new();
 
         public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, NodeNetwork.InternalDispatchFunc dispatch, Func<List<string>> getPeerIds, Action<string> discouragePeer)
         {
@@ -126,7 +144,7 @@ namespace BitcoinNetworkSimulator
                     {
                         var tx = JsonSerializer.Deserialize<Transaction>(body ?? "",
                             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0)
+                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0 || string.IsNullOrWhiteSpace(tx.Asset))
                         {
                             statusCode = 400;
                             responseBody = "{\"status\":\"bad transaction\"}";
@@ -157,7 +175,7 @@ namespace BitcoinNetworkSimulator
 
                         var tx = JsonSerializer.Deserialize<Transaction>(body ?? "",
                             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0)
+                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0 || string.IsNullOrWhiteSpace(tx.Asset))
                         {
                             statusCode = 400;
                             responseBody = "{\"status\":\"bad transaction\"}";
@@ -168,6 +186,60 @@ namespace BitcoinNetworkSimulator
                         responseBody = admitted
                             ? "{\"status\":\"accepted\"}"
                             : JsonSerializer.Serialize(new { status = alreadySeen ? "already seen" : "ignored", reason });
+                        break;
+                    }
+
+                case var r when r.StartsWith("/peersFor/") && method == "GET":
+                    {
+                        var lineage = Uri.UnescapeDataString(route.Substring("/peersFor/".Length));
+                        var myLineage = Chain.RuleNameForHeight(Chain.Latest.Index + 1) ?? Ledger.DefaultAssetName;
+                        var ids = lineage == myLineage
+                            ? _getPeerIds()
+                            : _foreignLineagePeers.TryGetValue(lineage, out var known) ? known.ToList() : new List<string>();
+                        responseBody = JsonSerializer.Serialize(new { Lineage = lineage, PeerIds = ids });
+                        break;
+                    }
+
+                case "/spendOnLineage" when method == "POST":
+                    {
+                        var request = JsonSerializer.Deserialize<SpendOnLineageRequest>(body ?? "",
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (request == null || string.IsNullOrWhiteSpace(request.Lineage) ||
+                            string.IsNullOrWhiteSpace(request.To) || request.Amount <= 0)
+                        {
+                            statusCode = 400;
+                            responseBody = "{\"status\":\"bad request\"}";
+                            break;
+                        }
+
+                        var myCurrentLineage = Chain.RuleNameForHeight(Chain.Latest.Index + 1) ?? Ledger.DefaultAssetName;
+                        var tx = new Transaction { From = Id, To = request.To, Amount = request.Amount, Asset = request.Lineage };
+
+                        if (request.Lineage == myCurrentLineage)
+                        {
+                            var (admitted, _, reason) = TryAdmitTransaction(tx);
+                            responseBody = admitted
+                                ? "{\"status\":\"accepted\"}"
+                                : JsonSerializer.Serialize(new { status = "rejected", reason });
+                            if (!admitted) statusCode = 400;
+                            break;
+                        }
+
+                        if (!_foreignLineagePeers.TryGetValue(request.Lineage, out var candidates) || candidates.Count == 0)
+                        {
+                            statusCode = 400;
+                            responseBody = JsonSerializer.Serialize(new
+                            {
+                                status = "rejected",
+                                reason = $"no known peer for lineage '{request.Lineage}' — this node has never switched away from it"
+                            });
+                            break;
+                        }
+
+                        var forwardTo = candidates.ElementAt(Random.Shared.Next(candidates.Count));
+                        var (forwardStatus, forwardBody) = await _dispatch(forwardTo, "POST", "/tx", Id, JsonSerializer.Serialize(tx));
+                        statusCode = forwardStatus;
+                        responseBody = forwardBody;
                         break;
                     }
 
@@ -256,36 +328,36 @@ namespace BitcoinNetworkSimulator
             return (statusCode, responseBody);
         }
 
-        /// <summary>
-        /// This account's balance in whichever asset would be active for the next block —
-        /// what a submitted transaction (which carries no asset of its own) is checked
-        /// against, since it can only ever be mined into that block.
-        /// </summary>
-        private decimal NextAssetBalance(string account)
+        /// <summary>This account's balance in the given asset, as of the next block this node would mine.</summary>
+        private decimal NextAssetBalance(string account, string asset)
         {
             var nextHeight = Chain.Latest.Index + 1;
-            var currentAsset = Chain.RuleNameForHeight(nextHeight) ?? Ledger.DefaultAssetName;
-            return Chain.SnapshotBalancesByAsset(nextHeight).GetValueOrDefault((account, currentAsset));
+            return Chain.SnapshotBalancesByAsset(nextHeight).GetValueOrDefault((account, asset));
         }
 
         /// <summary>
         /// Shared core of <c>/tx</c> and <c>/receiveTx</c>: drops a transaction this node has
-        /// already processed (by <see cref="Transaction.Id"/>), rejects one this node's own
-        /// current ledger can't afford, and otherwise enqueues it to <see cref="Mempool"/> and
-        /// relays it on to peers — so a transaction gossips outward from wherever it enters
-        /// the network, and only ever keeps propagating through (and eventually gets mined
-        /// by) peers whose own current ledger view can currently afford it.
+        /// already processed (by <see cref="Transaction.Id"/>), rejects one whose declared
+        /// <see cref="Transaction.Asset"/> isn't this node's own current lineage or that this
+        /// node's own current ledger can't afford, and otherwise enqueues it to
+        /// <see cref="Mempool"/> and relays it on to peers — so a transaction gossips outward
+        /// from wherever it enters the network, and only ever keeps propagating through (and
+        /// eventually gets mined by) peers currently on the same lineage who can afford it.
         /// </summary>
         private (bool Admitted, bool AlreadySeen, string Reason) TryAdmitTransaction(Transaction tx)
         {
             if (!_seenTransactionIds.TryAdd(tx.Id, 0))
                 return (false, true, "already seen");
 
+            var myLineage = Chain.RuleNameForHeight(Chain.Latest.Index + 1) ?? Ledger.DefaultAssetName;
+            if (tx.Asset != myLineage)
+                return (false, false, $"wrong lineage: this node is currently on '{myLineage}', transaction declares '{tx.Asset}'");
+
             if (tx.From != Economics.CoinbaseSender)
             {
-                var available = NextAssetBalance(tx.From);
+                var available = NextAssetBalance(tx.From, tx.Asset);
                 if (tx.Amount > available)
-                    return (false, false, $"insufficient balance: {tx.From} has {available}, tried to send {tx.Amount}");
+                    return (false, false, $"insufficient balance: {tx.From} has {available} of '{tx.Asset}', tried to send {tx.Amount}");
             }
 
             Mempool.Enqueue(tx);
@@ -402,6 +474,62 @@ namespace BitcoinNetworkSimulator
                 }
             }
         }
+
+        /// <summary>
+        /// Called once, the moment this node's own active lineage switches away from
+        /// <paramref name="oldLineage"/> (see <see cref="Blockchain.OnLineageSwitched"/>).
+        /// Snapshots this node's current gossip peers into <see cref="_foreignLineagePeers"/>
+        /// under the outgoing lineage — the one moment they're still known-good — since a
+        /// lineage never previously observed gets no seed and can never be discovered later.
+        /// </summary>
+        public void SeedForeignLineagePeers(string oldLineage, string newLineage, int atHeight)
+        {
+            var mySnapshot = _getPeerIds();
+            var set = _foreignLineagePeers.GetOrAdd(oldLineage, _ => new HashSet<string>());
+            lock (set) { set.UnionWith(mySnapshot); }
+            Console.WriteLine($"[{Id}] lineage switched '{oldLineage}' -> '{newLineage}' at height {atHeight} — seeded {mySnapshot.Count} peer(s) for '{oldLineage}'");
+        }
+
+        /// <summary>
+        /// For every lineage this node tracks a foreign peer list for, asks one known peer for
+        /// its own current peer-id list on that same lineage and unions the result in — a
+        /// minimal, id-list-only exchange (via <c>/peersFor/&lt;lineage&gt;</c>) that never
+        /// touches blocks, chains, or validation, so this node never actually joins or trusts
+        /// that lineage's network.
+        /// </summary>
+        public async Task RefreshForeignLineagePeersAsync()
+        {
+            foreach (var (lineage, peers) in _foreignLineagePeers)
+            {
+                List<string> snapshot;
+                lock (peers) { snapshot = peers.ToList(); }
+                if (snapshot.Count == 0) continue;
+
+                var askId = snapshot[Random.Shared.Next(snapshot.Count)];
+                try
+                {
+                    var (statusCode, responseBody) = await _dispatch(askId, "GET", $"/peersFor/{Uri.EscapeDataString(lineage)}", Id, null);
+                    if (statusCode < 200 || statusCode >= 300) continue;
+
+                    var parsed = JsonSerializer.Deserialize<PeersForResponse>(responseBody,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    if (parsed?.PeerIds == null || parsed.PeerIds.Count == 0) continue;
+
+                    lock (peers) { peers.UnionWith(parsed.PeerIds.Where(p => p != Id)); }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{Id}] couldn't refresh '{lineage}' peers via {askId}: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    /// <summary>Response shape of <c>GET /&lt;node-id&gt;/peersFor/&lt;lineage&gt;</c> — see <see cref="Node.HandleAsync"/>.</summary>
+    public class PeersForResponse
+    {
+        public string Lineage { get; set; } = "";
+        public List<string> PeerIds { get; set; } = new();
     }
 
     /// <summary>

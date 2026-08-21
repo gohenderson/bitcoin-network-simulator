@@ -14,9 +14,9 @@ namespace BitcoinNetworkSimulator
     /// made-up user names, since only node IDs ever actually receive coins. Balances are
     /// read from a live <c>/balances</c> snapshot each round, per account and asset, and a
     /// sender never gets asked to send more than they currently have of whichever asset was
-    /// picked. A generated transaction carries no asset of its own, so if the picked asset
-    /// isn't the one active at the block it eventually lands in, the target node's
-    /// <c>/tx</c> endpoint simply rejects it, the same as any other unaffordable transaction.
+    /// picked. Submits to the same node that snapshot came from, declaring that exact asset
+    /// — if that node's own active lineage has since moved on, its <c>/tx</c> endpoint
+    /// rejects it, the same as any other unaffordable transaction.
     /// </summary>
     public static class TransactionGenerator
     {
@@ -38,7 +38,7 @@ namespace BitcoinNetworkSimulator
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
 
                     var spenders = balances
-                        .SelectMany(byAccount => byAccount.Value.Select(byAsset => (Account: byAccount.Key, Amount: byAsset.Value)))
+                        .SelectMany(byAccount => byAccount.Value.Select(byAsset => (Account: byAccount.Key, Asset: byAsset.Key, Amount: byAsset.Value)))
                         .Where(s => s.Amount > 0m)
                         .ToList();
                     if (spenders.Count == 0) { if (!await DelayOrCancelled(1500, token)) break; continue; }
@@ -49,12 +49,11 @@ namespace BitcoinNetworkSimulator
                     do { to = nodeIds[Rng.Next(nodeIds.Count)]; } while (to == from && nodeIds.Count > 1);
 
                     var amount = Math.Min(spender.Amount, (decimal)Rng.Next(1, 100));
-                    var tx = new Transaction { From = from, To = to, Amount = amount };
+                    var tx = new Transaction { From = from, To = to, Amount = amount, Asset = spender.Asset };
 
-                    var targetId = nodeIds[Rng.Next(nodeIds.Count)];
                     var json = JsonSerializer.Serialize(tx);
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
-                    await http.PostAsync($"http://localhost:{port}/{targetId}/tx", content, token);
+                    await http.PostAsync($"http://localhost:{port}/{queryId}/tx", content, token);
                 }
                 catch (OperationCanceledException) { break; }
                 catch { }
