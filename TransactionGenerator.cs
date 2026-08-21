@@ -12,8 +12,11 @@ namespace BitcoinNetworkSimulator
     /// <summary>
     /// Synthetic transaction traffic generator. Sends from real node IDs rather than
     /// made-up user names, since only node IDs ever actually receive coins. Balances are
-    /// recomputed from a live <c>/chain</c> snapshot each round, and a sender never gets
-    /// asked to send more than they currently have.
+    /// read from a live <c>/balances</c> snapshot each round, per account and asset, and a
+    /// sender never gets asked to send more than they currently have of whichever asset was
+    /// picked. A generated transaction carries no asset of its own, so if the picked asset
+    /// isn't the one active at the block it eventually lands in, the target node's
+    /// <c>/tx</c> endpoint simply rejects it, the same as any other unaffordable transaction.
     /// </summary>
     public static class TransactionGenerator
     {
@@ -30,19 +33,22 @@ namespace BitcoinNetworkSimulator
                     if (nodeIds.Count == 0) { if (!await DelayOrCancelled(500, token)) break; continue; }
 
                     var queryId = nodeIds[Rng.Next(nodeIds.Count)];
-                    var chainJson = await http.GetStringAsync($"http://localhost:{port}/{queryId}/chain", token);
-                    var chain = JsonSerializer.Deserialize<List<Block>>(chainJson,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<Block>();
-                    var balances = Ledger.ComputeBalances(chain);
+                    var balancesJson = await http.GetStringAsync($"http://localhost:{port}/{queryId}/balances", token);
+                    var balances = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, decimal>>>(balancesJson,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
 
-                    var spenders = nodeIds.Where(n => balances.GetValueOrDefault(n) > 0m).ToList();
+                    var spenders = balances
+                        .SelectMany(byAccount => byAccount.Value.Select(byAsset => (Account: byAccount.Key, Amount: byAsset.Value)))
+                        .Where(s => s.Amount > 0m)
+                        .ToList();
                     if (spenders.Count == 0) { if (!await DelayOrCancelled(1500, token)) break; continue; }
 
-                    var from = spenders[Rng.Next(spenders.Count)];
+                    var spender = spenders[Rng.Next(spenders.Count)];
+                    var from = spender.Account;
                     string to;
                     do { to = nodeIds[Rng.Next(nodeIds.Count)]; } while (to == from && nodeIds.Count > 1);
 
-                    var amount = Math.Min(balances[from], (decimal)Rng.Next(1, 100));
+                    var amount = Math.Min(spender.Amount, (decimal)Rng.Next(1, 100));
                     var tx = new Transaction { From = from, To = to, Amount = amount };
 
                     var targetId = nodeIds[Rng.Next(nodeIds.Count)];

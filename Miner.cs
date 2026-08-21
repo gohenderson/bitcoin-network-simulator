@@ -225,14 +225,20 @@ namespace BitcoinNetworkSimulator
             var parent = _chain.Latest;
             var ancestors = _chain.Snapshot();
             var height = parent.Index + 1;
-            var simulatedBalances = Ledger.ComputeBalances(ancestors);
+            var byAsset = Ledger.ComputeBalancesByAsset(ancestors, _ruleSchedule.NameForHeight, height);
+            var currentAsset = _ruleSchedule.NameForHeight(height) ?? Ledger.DefaultAssetName;
+            var simulatedBalances = byAsset
+                .Where(kv => kv.Key.Asset == currentAsset)
+                .ToDictionary(kv => kv.Key.Account, kv => kv.Value);
 
             var debasement = _ruleSchedule.DebasementFactorAt(height);
+            var netWorth = byAsset
+                .Where(kv => kv.Key.Account == Id)
+                .Sum(kv => kv.Value * _ruleSchedule.PriceForNameAt(kv.Key.Asset, height));
 
             if (_costOfLiving > 0m && _ruleSchedule.IsValueSeeking)
             {
                 _accruedLivingCost += _costOfLiving * debasement;
-                var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
                 if (_accruedLivingCost > netWorth + _startingCapital)
                 {
                     Console.WriteLine($"[{Id}] insolvent: accrued living cost {_accruedLivingCost} exceeds net worth {netWorth} plus starting capital {_startingCapital} — leaving the network");
@@ -243,7 +249,6 @@ namespace BitcoinNetworkSimulator
 
             if (_hashPowerCost > 0m && _ruleSchedule.IsValueSeeking && (_maxHashPower <= 0 || HashPower < _maxHashPower))
             {
-                var netWorth = simulatedBalances.GetValueOrDefault(Id) * _ruleSchedule.CurrentPriceAt(height);
                 var effectiveHashPowerCost = _hashPowerCost * debasement;
                 var uncommitted = netWorth - _accruedLivingCost - _investedInHashPower;
                 if (uncommitted >= effectiveHashPowerCost)
@@ -349,7 +354,10 @@ namespace BitcoinNetworkSimulator
             while (_mempool.TryDequeue(out var tx)) pending.Add(tx);
 
             var txs = new List<Transaction>();
-            var simulatedBalances = Ledger.ComputeBalances(ancestors);
+            var currentAsset = _ruleSchedule.NameForHeight(height) ?? Ledger.DefaultAssetName;
+            var simulatedBalances = Ledger.ComputeBalancesByAsset(ancestors, _ruleSchedule.NameForHeight, height)
+                .Where(kv => kv.Key.Asset == currentAsset)
+                .ToDictionary(kv => kv.Key.Account, kv => kv.Value);
 
             if (reward > 0m)
             {
@@ -416,10 +424,15 @@ namespace BitcoinNetworkSimulator
             var restB = pending.Skip(half).ToList();
             restB.Add(new Transaction { From = Id, To = "shadow-peer", Amount = 1m });
 
+            var currentAsset = _ruleSchedule.NameForHeight(height) ?? Ledger.DefaultAssetName;
+            var byAsset = Ledger.ComputeBalancesByAsset(ancestors, _ruleSchedule.NameForHeight, height);
+
             List<Transaction> BuildTxs(List<Transaction> rest)
             {
                 var txs = new List<Transaction>();
-                var simulatedBalances = Ledger.ComputeBalances(ancestors);
+                var simulatedBalances = byAsset
+                    .Where(kv => kv.Key.Asset == currentAsset)
+                    .ToDictionary(kv => kv.Key.Account, kv => kv.Value);
                 if (reward > 0m)
                 {
                     txs.Add(new Transaction { From = Economics.CoinbaseSender, To = Id, Amount = reward });

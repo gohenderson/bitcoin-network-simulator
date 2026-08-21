@@ -83,7 +83,7 @@ namespace BitcoinNetworkSimulator
                 EconomicWeight = n.EconomicWeight,
                 PeerCount = n.PeerCount,
                 BlocksWon = winCounts.GetValueOrDefault(n.Id, 0),
-                Balance = balances.GetValueOrDefault(n.Id),
+                Balances = balances.GetValueOrDefault(n.Id) ?? new Dictionary<string, decimal>(),
                 TotalSent = totalSent.GetValueOrDefault(n.Id)
             }).ToList();
 
@@ -138,24 +138,23 @@ namespace BitcoinNetworkSimulator
         }
 
         /// <summary>
-        /// Current balance and total-ever-sent (excluding coinbase, since minting to yourself
-        /// isn't spending) per account, read from whichever node is on the currently
-        /// most-agreed-upon tip — the same "arbitrary but consistent" stand-in the rest of the
-        /// dashboard already uses for a single canonical view of the network. Falls back to
-        /// any live node if no audit has run yet.
+        /// Current balance (per coin/asset) and total-ever-sent (excluding coinbase, since
+        /// minting to yourself isn't spending) per account, read from whichever node is on
+        /// the currently most-agreed-upon tip — the same "arbitrary but consistent" stand-in
+        /// the rest of the dashboard already uses for a single canonical view of the network.
+        /// Falls back to any live node if no audit has run yet.
         /// </summary>
-        private static (Dictionary<string, decimal> Balances, Dictionary<string, decimal> TotalSent) ComputeLedgerSummary(NodeNetwork network, WatcherSnapshot? lastAudit)
+        private static (Dictionary<string, Dictionary<string, decimal>> Balances, Dictionary<string, decimal> TotalSent) ComputeLedgerSummary(NodeNetwork network, WatcherSnapshot? lastAudit)
         {
             var representativeNodeId = lastAudit?.Tips.FirstOrDefault()?.NodeIds.FirstOrDefault()
                 ?? network.GetAllNodeIds().FirstOrDefault();
             var node = representativeNodeId != null ? network.ResolveNode(representativeNodeId) : null;
-            if (node == null) return (new Dictionary<string, decimal>(), new Dictionary<string, decimal>());
+            if (node == null) return (new Dictionary<string, Dictionary<string, decimal>>(), new Dictionary<string, decimal>());
 
-            var chain = node.Chain.Snapshot();
-            var balances = Ledger.ComputeBalances(chain);
+            var balances = Ledger.ToNestedDictionary(node.Chain.SnapshotBalancesByAsset());
 
             var totalSent = new Dictionary<string, decimal>();
-            foreach (var block in chain)
+            foreach (var block in node.Chain.Snapshot())
                 foreach (var tx in block.Transactions)
                     if (tx.From != Economics.CoinbaseSender)
                         totalSent[tx.From] = totalSent.GetValueOrDefault(tx.From) + tx.Amount;
@@ -546,7 +545,7 @@ namespace BitcoinNetworkSimulator
             public int EconomicWeight { get; init; }
             public int PeerCount { get; init; }
             public int BlocksWon { get; init; }
-            public decimal Balance { get; init; }
+            public Dictionary<string, decimal> Balances { get; init; } = new();
             public decimal TotalSent { get; init; }
         }
 
@@ -898,6 +897,12 @@ function fmtCoins(x) {
   return Number(x).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') || '0';
 }
 
+function fmtBalances(balances) {
+  var assets = Object.keys(balances || {}).filter(function (a) { return balances[a] > 0; });
+  if (!assets.length) return '0';
+  return assets.map(function (a) { return fmtCoins(balances[a]) + ' ' + a; }).join(', ');
+}
+
 function renderAllNodes(nodes) {
   var tbody = document.getElementById('all-nodes');
   if (!nodes.length) { tbody.innerHTML = '<tr><td colspan=""10"" class=""empty"">No nodes yet.</td></tr>'; return; }
@@ -912,7 +917,7 @@ function renderAllNodes(nodes) {
       '<td>' + n.blocksWon + '</td>' +
       '<td>' + n.peerCount + '</td>' +
       '<td>' + n.economicWeight + '</td>' +
-      '<td>' + fmtCoins(n.balance) + '</td>' +
+      '<td>' + fmtBalances(n.balances) + '</td>' +
       '<td>' + fmtCoins(n.totalSent) + '</td>' +
       '</tr>';
   }).join('');

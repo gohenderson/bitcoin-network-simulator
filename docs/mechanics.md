@@ -39,10 +39,15 @@ simulator deliberately makes.
   publicly-reachable nodes (often run by economically significant
   operators — exchanges, payment processors) relay for far more of the
   network than an ordinary node, without any special protocol role. A node
-  that accepts a new block or chain from one peer relays it on to its own
-  other peers, so it still reaches the whole network hop by hop as long as
-  the peer graph is connected. See `NodeNetwork.cs` and the "Peer
-  topology" fields in [Scenarios](scenarios.md).
+  that accepts a new block, chain, or pending transaction from one peer
+  relays it on to its own other peers, so it still reaches the whole network
+  hop by hop as long as the peer graph is connected. A transaction only ever
+  keeps propagating through peers whose own current ledger view can afford
+  it — a peer that can't (e.g. one on a different consensus-rules lineage)
+  just drops it there, silently and without discouraging whoever sent it,
+  since that's routine rather than provable misbehavior the way an invalid
+  block is. See `NodeNetwork.cs` and the "Peer topology" fields in
+  [Scenarios](scenarios.md).
 - **Peer discouragement.** Real Bitcoin nodes never compare consensus rules
   up front — there's no such field in the handshake — they discover a
   disagreement lazily, the first time a peer actually sends something that
@@ -69,15 +74,22 @@ simulator deliberately makes.
   `RuleSchedule`) — not a value the block itself claims — and rejects a
   mismatch.
 - **Balances & double-spends.** Every account's balance is derived purely
-  from chain history (`Ledger.ComputeBalances`). A block containing a
-  transaction that spends more than the sender's balance at that exact
-  point in the chain is rejected outright — which transitively catches
-  double-spends too.
+  from chain history (`Ledger.ComputeBalancesByAsset`), separately per
+  coin/asset — an asset is identified by the name of whichever
+  `RuleSchedule` entry was active at a given height. A block containing a
+  transaction that spends more than the sender's balance in that block's
+  own active asset, at that exact point in the chain, is rejected outright
+  — which transitively catches double-spends too. When a node's active
+  ruleset switches names from one height to the next (a hard fork — see
+  [Scenarios](scenarios.md)' `RuleSchedule`), every account's balance in
+  the outgoing asset is cloned into the new asset, so pre-fork coins remain
+  spendable as a balance of the new coin too, exactly as a real hard fork
+  splits one coin into two.
 - **Mining participation.** Mining is optional per node (`CanMine`). A
   wallet-only node is a completely normal network participant — it serves
   `/<node-id>/chain`, `/<node-id>/balances`, `/<node-id>/mempool`, validates
-  and relays blocks/chains, and can send or receive coins — it just never
-  gets a mining turn.
+  and relays blocks/chains/transactions, and can send or receive coins — it
+  just never gets a mining turn.
 - **Mining pools.** An honest, mining-enabled node can subscribe to a named
   pool. Every current member's `HashPower` is combined into one shared
   round-robin turn; on that turn, one member is chosen (weighted by its own

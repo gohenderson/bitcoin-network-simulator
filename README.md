@@ -74,9 +74,10 @@ unknown node id gets a 404 before the request ever reaches a node.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/<node-id>/chain` | GET | That node's full local chain. |
-| `/<node-id>/balances` | GET | Every account's balance, computed from that node's chain. |
+| `/<node-id>/balances` | GET | Every account's balance per coin/asset, computed from that node's chain. |
 | `/<node-id>/mempool` | GET | Transactions that node has accepted but not yet mined. |
-| `/<node-id>/tx` | POST | Submit a transaction (`{"From", "To", "Amount"}`) to that node's mempool. |
+| `/<node-id>/tx` | POST | Submit a transaction (`{"From", "To", "Amount"}`) to that node's mempool, which relays it on to peers. |
+| `/<node-id>/receiveTx` | POST | Peer-to-peer: offer a transaction another node has already admitted to its own mempool. |
 | `/<node-id>/receiveBlock` | POST | Peer-to-peer: offer a single new block to append to that node's tip. |
 | `/<node-id>/receiveChain` | POST | Peer-to-peer: offer a full candidate chain; adopted if longer and valid. |
 | `/dashboard/` | GET | Live web dashboard — see [Persistence, watching, and project layout](docs/operations.md). |

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -42,6 +43,7 @@ namespace BitcoinNetworkSimulator
         private readonly NodeNetwork.InternalDispatchFunc _dispatch;
         private readonly Func<List<string>> _getPeerIds;
         private readonly Action<string> _discouragePeer;
+        private readonly ConcurrentDictionary<string, byte> _seenTransactionIds = new();
 
         public Node(string id, Blockchain chain, ConcurrentQueue<Transaction> mempool, ChainWatcher watcher, NodeNetwork.InternalDispatchFunc dispatch, Func<List<string>> getPeerIds, Action<string> discouragePeer)
         {
@@ -117,7 +119,7 @@ namespace BitcoinNetworkSimulator
                     break;
 
                 case "/balances":
-                    responseBody = JsonSerializer.Serialize(Ledger.ComputeBalances(Chain.Snapshot()));
+                    responseBody = JsonSerializer.Serialize(Ledger.ToNestedDictionary(Chain.SnapshotBalancesByAsset()));
                     break;
 
                 case "/tx" when method == "POST":
@@ -129,21 +131,43 @@ namespace BitcoinNetworkSimulator
                             statusCode = 400;
                             responseBody = "{\"status\":\"bad transaction\"}";
                         }
-                        else if (tx.From != Economics.CoinbaseSender &&
-                            Ledger.GetBalance(Chain.Snapshot(), tx.From) is var available && tx.Amount > available)
-                        {
-                            statusCode = 400;
-                            responseBody = JsonSerializer.Serialize(new
-                            {
-                                status = "rejected",
-                                reason = $"insufficient balance: {tx.From} has {available}, tried to send {tx.Amount}"
-                            });
-                        }
                         else
                         {
-                            Mempool.Enqueue(tx);
-                            responseBody = "{\"status\":\"accepted\"}";
+                            var (admitted, _, reason) = TryAdmitTransaction(tx);
+                            if (admitted)
+                            {
+                                responseBody = "{\"status\":\"accepted\"}";
+                            }
+                            else
+                            {
+                                statusCode = 400;
+                                responseBody = JsonSerializer.Serialize(new { status = "rejected", reason });
+                            }
                         }
+                        break;
+                    }
+
+                case "/receiveTx" when method == "POST":
+                    {
+                        if (!IsStillAPeer(senderId, out responseBody))
+                        {
+                            statusCode = 403;
+                            break;
+                        }
+
+                        var tx = JsonSerializer.Deserialize<Transaction>(body ?? "",
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                        if (tx == null || string.IsNullOrWhiteSpace(tx.From) || string.IsNullOrWhiteSpace(tx.To) || tx.Amount <= 0)
+                        {
+                            statusCode = 400;
+                            responseBody = "{\"status\":\"bad transaction\"}";
+                            break;
+                        }
+
+                        var (admitted, alreadySeen, reason) = TryAdmitTransaction(tx);
+                        responseBody = admitted
+                            ? "{\"status\":\"accepted\"}"
+                            : JsonSerializer.Serialize(new { status = alreadySeen ? "already seen" : "ignored", reason });
                         break;
                     }
 
@@ -164,6 +188,7 @@ namespace BitcoinNetworkSimulator
                             {
                                 Console.WriteLine($"[{Id}] accepted block #{block.Index} built by {block.BuiltBy} (validated: parent + target + hash + coinbase + tx checks passed)");
                                 _watcher.ObserveAccepted(Id, block);
+                                PruneMempool(new[] { block });
                                 responseBody = "{\"status\":\"appended\"}";
                                 _ = RelayBlockAsync(block);
                             }
@@ -203,6 +228,7 @@ namespace BitcoinNetworkSimulator
                             {
                                 Console.WriteLine($"[{Id}] REORGANIZED: {reason}");
                                 _watcher.ObserveReorganization(Id, reason);
+                                PruneMempool(candidate);
                                 responseBody = JsonSerializer.Serialize(new { status = "reorganized", reason });
                                 _ = RelayChainAsync(candidate);
                             }
@@ -228,6 +254,61 @@ namespace BitcoinNetworkSimulator
             }
 
             return (statusCode, responseBody);
+        }
+
+        /// <summary>
+        /// This account's balance in whichever asset would be active for the next block —
+        /// what a submitted transaction (which carries no asset of its own) is checked
+        /// against, since it can only ever be mined into that block.
+        /// </summary>
+        private decimal NextAssetBalance(string account)
+        {
+            var nextHeight = Chain.Latest.Index + 1;
+            var currentAsset = Chain.RuleNameForHeight(nextHeight) ?? Ledger.DefaultAssetName;
+            return Chain.SnapshotBalancesByAsset(nextHeight).GetValueOrDefault((account, currentAsset));
+        }
+
+        /// <summary>
+        /// Shared core of <c>/tx</c> and <c>/receiveTx</c>: drops a transaction this node has
+        /// already processed (by <see cref="Transaction.Id"/>), rejects one this node's own
+        /// current ledger can't afford, and otherwise enqueues it to <see cref="Mempool"/> and
+        /// relays it on to peers — so a transaction gossips outward from wherever it enters
+        /// the network, and only ever keeps propagating through (and eventually gets mined
+        /// by) peers whose own current ledger view can currently afford it.
+        /// </summary>
+        private (bool Admitted, bool AlreadySeen, string Reason) TryAdmitTransaction(Transaction tx)
+        {
+            if (!_seenTransactionIds.TryAdd(tx.Id, 0))
+                return (false, true, "already seen");
+
+            if (tx.From != Economics.CoinbaseSender)
+            {
+                var available = NextAssetBalance(tx.From);
+                if (tx.Amount > available)
+                    return (false, false, $"insufficient balance: {tx.From} has {available}, tried to send {tx.Amount}");
+            }
+
+            Mempool.Enqueue(tx);
+            _ = RelayTxAsync(tx);
+            return (true, false, "ok");
+        }
+
+        /// <summary>
+        /// Drops any of this node's own pending mempool transactions that a just-accepted
+        /// block (or reorg) already included, so this node doesn't later try to mine — and
+        /// get an honest block rejected over — a transaction that's already settled.
+        /// </summary>
+        private void PruneMempool(IEnumerable<Block> newlyAcceptedBlocks)
+        {
+            var minedIds = new HashSet<string>(newlyAcceptedBlocks.SelectMany(b => b.Transactions.Select(t => t.Id)));
+            if (minedIds.Count == 0) return;
+
+            var kept = new List<Transaction>();
+            while (Mempool.TryDequeue(out var tx))
+                if (!minedIds.Contains(tx.Id))
+                    kept.Add(tx);
+
+            foreach (var tx in kept) Mempool.Enqueue(tx);
         }
 
         /// <summary>
@@ -295,6 +376,29 @@ namespace BitcoinNetworkSimulator
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[{Id}] couldn't relay chain to peer {peerId}: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Forwards a transaction this node just admitted to its own mempool on to its other
+        /// peers. Best-effort and fire-and-forget, same as block/chain relay — a peer that's
+        /// unreachable, already has it, or can't currently afford it (e.g. it's on a
+        /// different consensus-rules lineage) just drops it there.
+        /// </summary>
+        private async Task RelayTxAsync(Transaction tx)
+        {
+            var json = JsonSerializer.Serialize(tx);
+            foreach (var peerId in _getPeerIds())
+            {
+                if (peerId == Id) continue;
+                try
+                {
+                    await _dispatch(peerId, "POST", "/receiveTx", Id, json);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[{Id}] couldn't relay tx to peer {peerId}: {ex.Message}");
                 }
             }
         }

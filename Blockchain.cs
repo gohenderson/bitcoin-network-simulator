@@ -11,6 +11,13 @@ namespace BitcoinNetworkSimulator
 {
     public class Transaction
     {
+        /// <summary>
+        /// Stable identity for relay dedup — set once at construction and preserved across
+        /// JSON round-trips, but not part of <see cref="Block.ComputeHash"/>'s payload or
+        /// SQLite persistence, since it's only ever needed against a live, in-process mempool
+        /// during the current run.
+        /// </summary>
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
         public string From { get; set; } = "";
         public string To { get; set; } = "";
         public decimal Amount { get; set; }
@@ -276,6 +283,18 @@ namespace BitcoinNetworkSimulator
         public decimal CurrentPriceAt(int height) =>
             _valueSeekingCandidates.Count > 0 ? BestCandidateAt(height).Price : 0m;
 
+        /// <summary>
+        /// The price of the named candidate at <paramref name="height"/>, or 0m if this node
+        /// isn't tracking a value-seeking candidate by that name (including when it isn't
+        /// value-seeking at all) — e.g. a legacy asset held from before value-seeking began.
+        /// </summary>
+        public decimal PriceForNameAt(string assetName, int height)
+        {
+            var candidate = _valueSeekingCandidates.FirstOrDefault(c => c.Name == assetName);
+            if (candidate == null) return 0m;
+            return PriceAt(candidate.PriceSchedule, height) * DebasementFactorAt(height);
+        }
+
         private ConsensusRules MostProfitableAt(int height)
         {
             var (best, value, _, _) = BestCandidateAt(height);
@@ -371,26 +390,76 @@ namespace BitcoinNetworkSimulator
         }
     }
 
-    /// <summary>Derives every account's current balance purely from public chain history.</summary>
+    /// <summary>
+    /// Derives every account's balance per coin/asset purely from public chain history. An
+    /// asset is identified by the name of whichever <see cref="ConsensusRules"/> was active
+    /// at a given height (see <see cref="RuleSchedule.NameForHeight"/>), falling back to
+    /// <see cref="DefaultAssetName"/> for unnamed/hardcoded-default rulesets. When the active
+    /// asset changes from one height to the next, every account's balance in the outgoing
+    /// asset is cloned into the new asset — the same "everyone's coin becomes spendable on
+    /// both branches" effect a real hard fork has.
+    /// </summary>
     public static class Ledger
     {
-        public static Dictionary<string, decimal> ComputeBalances(IEnumerable<Block> chain)
+        public const string DefaultAssetName = "(default)";
+
+        /// <summary>
+        /// Balances as of the top of <paramref name="throughHeight"/> (default: the chain's
+        /// own last height). Passing a height one past the chain's last block lets a caller
+        /// ask "what would balances be at the moment the next block is minted" — picking up
+        /// an asset-change clone that happens exactly at that height, before the block exists.
+        /// </summary>
+        public static Dictionary<(string Account, string Asset), decimal> ComputeBalancesByAsset(
+            IReadOnlyList<Block> chain, Func<int, string?> ruleNameForHeight, int? throughHeight = null)
         {
-            var balances = new Dictionary<string, decimal>();
-            foreach (var block in chain)
+            var balances = new Dictionary<(string, string), decimal>();
+            var upTo = throughHeight ?? (chain.Count - 1);
+            string? currentAsset = null;
+
+            for (var h = 0; h <= upTo; h++)
             {
-                foreach (var tx in block.Transactions)
+                var asset = ruleNameForHeight(h) ?? DefaultAssetName;
+                if (currentAsset != null && asset != currentAsset)
+                    CloneForward(balances, currentAsset, asset);
+                currentAsset = asset;
+
+                if (h >= chain.Count) continue;
+                foreach (var tx in chain[h].Transactions)
                 {
                     if (tx.From != Economics.CoinbaseSender)
-                        balances[tx.From] = balances.GetValueOrDefault(tx.From) - tx.Amount;
-                    balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
+                        balances[(tx.From, asset)] = balances.GetValueOrDefault((tx.From, asset)) - tx.Amount;
+                    balances[(tx.To, asset)] = balances.GetValueOrDefault((tx.To, asset)) + tx.Amount;
                 }
             }
+
             return balances;
         }
 
-        public static decimal GetBalance(IEnumerable<Block> chain, string account) =>
-            ComputeBalances(chain).GetValueOrDefault(account);
+        /// <summary>Reshapes an asset-keyed balance snapshot into account → asset → amount, for JSON.</summary>
+        public static Dictionary<string, Dictionary<string, decimal>> ToNestedDictionary(
+            Dictionary<(string Account, string Asset), decimal> balances)
+        {
+            var nested = new Dictionary<string, Dictionary<string, decimal>>();
+            foreach (var ((account, asset), amount) in balances)
+            {
+                if (!nested.TryGetValue(account, out var byAsset))
+                    nested[account] = byAsset = new Dictionary<string, decimal>();
+                byAsset[asset] = amount;
+            }
+            return nested;
+        }
+
+        /// <summary>Clones every balance held in <paramref name="fromAsset"/> into <paramref name="toAsset"/>, additively.</summary>
+        internal static void CloneForward(Dictionary<(string Account, string Asset), decimal> balances, string fromAsset, string toAsset)
+        {
+            foreach (var (account, amount) in balances
+                .Where(kv => kv.Key.Asset == fromAsset)
+                .Select(kv => (kv.Key.Account, kv.Value))
+                .ToList())
+            {
+                balances[(account, toAsset)] = balances.GetValueOrDefault((account, toAsset)) + amount;
+            }
+        }
     }
 
     /// <summary>
@@ -435,6 +504,10 @@ namespace BitcoinNetworkSimulator
         /// <summary>This node's named ruleset at <paramref name="height"/> — see <see cref="RuleSchedule.NameForHeight"/>.</summary>
         public string? RuleNameForHeight(int height) => _ruleSchedule.NameForHeight(height);
 
+        /// <summary>This node's own balances, per coin/asset — see <see cref="Ledger.ComputeBalancesByAsset"/>.</summary>
+        public Dictionary<(string Account, string Asset), decimal> SnapshotBalancesByAsset(int? throughHeight = null) =>
+            Ledger.ComputeBalancesByAsset(Snapshot(), RuleNameForHeight, throughHeight);
+
         /// <summary>Appends a block this node built itself, without re-validating it.</summary>
         public void AppendTrusting(Block block)
         {
@@ -444,7 +517,7 @@ namespace BitcoinNetworkSimulator
             }
         }
 
-        private static (bool Ok, string Reason) ValidateChain(List<Block> candidate, Func<int, ConsensusRules> rulesForHeight)
+        private static (bool Ok, string Reason) ValidateChain(List<Block> candidate, Func<int, ConsensusRules> rulesForHeight, Func<int, string?> ruleNameForHeight)
         {
             if (candidate == null || candidate.Count == 0)
                 return (false, "candidate chain is empty");
@@ -452,11 +525,17 @@ namespace BitcoinNetworkSimulator
             if (candidate[0].Index != 0)
                 return (false, "candidate chain does not start at genesis");
 
-            var balances = new Dictionary<string, decimal>();
+            var balances = new Dictionary<(string Account, string Asset), decimal>();
+            string? currentAsset = null;
 
             for (int i = 0; i < candidate.Count; i++)
             {
                 var block = candidate[i];
+
+                var asset = ruleNameForHeight(block.Index) ?? Ledger.DefaultAssetName;
+                if (currentAsset != null && asset != currentAsset)
+                    Ledger.CloneForward(balances, currentAsset, asset);
+                currentAsset = asset;
 
                 if (block.Transactions == null)
                     return (false, $"block #{block.Index} transactions list is null");
@@ -521,17 +600,17 @@ namespace BitcoinNetworkSimulator
 
                     if (tx.From == Economics.CoinbaseSender)
                     {
-                        balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
+                        balances[(tx.To, asset)] = balances.GetValueOrDefault((tx.To, asset)) + tx.Amount;
                     }
                     else
                     {
-                        var available = balances.GetValueOrDefault(tx.From);
+                        var available = balances.GetValueOrDefault((tx.From, asset));
                         if (tx.Amount > available)
-                            return (false, $"block #{block.Index} contains a transaction spending {tx.Amount} from '{tx.From}', " +
-                                $"who only has a balance of {available} at that point in the chain — insufficient funds or a double-spend");
+                            return (false, $"block #{block.Index} contains a transaction spending {tx.Amount} of '{asset}' from '{tx.From}', " +
+                                $"who only has a balance of {available} in that asset at that point in the chain — insufficient funds or a double-spend");
 
-                        balances[tx.From] = available - tx.Amount;
-                        balances[tx.To] = balances.GetValueOrDefault(tx.To) + tx.Amount;
+                        balances[(tx.From, asset)] = available - tx.Amount;
+                        balances[(tx.To, asset)] = balances.GetValueOrDefault((tx.To, asset)) + tx.Amount;
                     }
                 }
 
@@ -549,7 +628,7 @@ namespace BitcoinNetworkSimulator
         /// </summary>
         public static (bool Ok, string Reason) ValidateSnapshot(List<Block> candidate)
         {
-            return ValidateChain(candidate, height => candidate[height].Rules);
+            return ValidateChain(candidate, height => candidate[height].Rules, height => null);
         }
 
         /// <summary>
@@ -571,7 +650,7 @@ namespace BitcoinNetworkSimulator
                     return (false, $"previous hash mismatch: expected {tip.Hash}, got {block.PreviousHash}", false);
 
                 var candidate = new List<Block>(Blocks) { block };
-                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
                 if (!validation.Ok)
                     return (false, validation.Reason, true);
 
@@ -588,7 +667,7 @@ namespace BitcoinNetworkSimulator
         {
             lock (_lock)
             {
-                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
                 if (!validation.Ok)
                     return (false, $"candidate rejected: {validation.Reason}", true);
 
@@ -611,7 +690,7 @@ namespace BitcoinNetworkSimulator
         {
             lock (_lock)
             {
-                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight);
+                var validation = ValidateChain(candidate, _ruleSchedule.RulesForHeight, _ruleSchedule.NameForHeight);
                 if (!validation.Ok)
                     return (false, $"saved chain failed validation: {validation.Reason}");
 
