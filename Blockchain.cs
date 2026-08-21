@@ -545,6 +545,9 @@ namespace BitcoinNetworkSimulator
         /// <summary>This node's named ruleset at <paramref name="height"/> — see <see cref="RuleSchedule.NameForHeight"/>.</summary>
         public string? RuleNameForHeight(int height) => _ruleSchedule.NameForHeight(height);
 
+        /// <summary>This node's own $-reference price for <paramref name="asset"/> at <paramref name="height"/> — see <see cref="RuleSchedule.PriceForNameAt"/>.</summary>
+        public decimal PriceForNameAt(string asset, int height) => _ruleSchedule.PriceForNameAt(asset, height);
+
         /// <summary>This node's own balances, per coin/asset — see <see cref="Ledger.ComputeBalancesByAsset"/>.</summary>
         public Dictionary<(string Account, string Asset), decimal> SnapshotBalancesByAsset(int? throughHeight = null) =>
             Ledger.ComputeBalancesByAsset(Snapshot(), RuleNameForHeight, throughHeight);

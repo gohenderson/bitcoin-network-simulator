@@ -70,7 +70,7 @@ namespace BitcoinNetworkSimulator
             var winCounts = watcherStore.GetWinCountsByNode();
             var lastAudit = watcher.LastSnapshot;
             var (hashPowerByNodeId, totalHashPower, validatedNodeCount) = ComputeInfluenceContext(snapshot, lastAudit);
-            var (balances, totalSent) = ComputeLedgerSummary(network, lastAudit);
+            var (balances, currentAsset, totalSent, assetPrices) = ComputeLedgerSummary(network, lastAudit);
 
             var dashboardNodes = snapshot.Nodes.Select(n => new DashboardNode
             {
@@ -84,7 +84,7 @@ namespace BitcoinNetworkSimulator
                 PeerCount = n.PeerCount,
                 BlocksWon = winCounts.GetValueOrDefault(n.Id, 0),
                 Balances = balances.GetValueOrDefault(n.Id) ?? new Dictionary<string, decimal>(),
-                TotalSent = totalSent.GetValueOrDefault(n.Id)
+                TotalSent = totalSent.GetValueOrDefault(n.Id) ?? new Dictionary<string, decimal>()
             }).ToList();
 
             var summary = new DashboardSummary
@@ -131,6 +131,8 @@ namespace BitcoinNetworkSimulator
                     NodeId = r.NodeId,
                     Reason = r.Reason
                 }).ToList(),
+                CurrentAsset = currentAsset,
+                AssetPrices = assetPrices,
                 Scenario = BuildScenarioSummary(scenarioRuntime)
             };
 
@@ -138,28 +140,43 @@ namespace BitcoinNetworkSimulator
         }
 
         /// <summary>
-        /// Current balance (per coin/asset) and total-ever-sent (excluding coinbase, since
-        /// minting to yourself isn't spending) per account, read from whichever node is on
-        /// the currently most-agreed-upon tip — the same "arbitrary but consistent" stand-in
-        /// the rest of the dashboard already uses for a single canonical view of the network.
-        /// Falls back to any live node if no audit has run yet.
+        /// Current balance and total-ever-sent (excluding coinbase, since minting to yourself
+        /// isn't spending), both per coin/asset; the asset currently active on that same view
+        /// (so the UI can tell a node's live balance apart from a dormant one); and each
+        /// distinct asset's current $-reference price (<see cref="RuleSchedule.PriceForNameAt"/>,
+        /// 0 for a scenario with no value-seeking price schedule) — all read from whichever
+        /// node is on the currently most-agreed-upon tip, the same "arbitrary but consistent"
+        /// stand-in the rest of the dashboard already uses for a single canonical view of the
+        /// network. Falls back to any live node if no audit has run yet.
         /// </summary>
-        private static (Dictionary<string, Dictionary<string, decimal>> Balances, Dictionary<string, decimal> TotalSent) ComputeLedgerSummary(NodeNetwork network, WatcherSnapshot? lastAudit)
+        private static (Dictionary<string, Dictionary<string, decimal>> Balances, string CurrentAsset, Dictionary<string, Dictionary<string, decimal>> TotalSent, Dictionary<string, decimal> AssetPrices) ComputeLedgerSummary(NodeNetwork network, WatcherSnapshot? lastAudit)
         {
             var representativeNodeId = lastAudit?.Tips.FirstOrDefault()?.NodeIds.FirstOrDefault()
                 ?? network.GetAllNodeIds().FirstOrDefault();
             var node = representativeNodeId != null ? network.ResolveNode(representativeNodeId) : null;
-            if (node == null) return (new Dictionary<string, Dictionary<string, decimal>>(), new Dictionary<string, decimal>());
+            if (node == null) return (new Dictionary<string, Dictionary<string, decimal>>(), "", new Dictionary<string, Dictionary<string, decimal>>(), new Dictionary<string, decimal>());
 
             var balances = Ledger.ToNestedDictionary(node.Chain.SnapshotBalancesByAsset());
+            var nextHeight = node.Chain.Latest.Index + 1;
+            var currentAsset = node.Chain.RuleNameForHeight(nextHeight) ?? Ledger.DefaultAssetName;
 
-            var totalSent = new Dictionary<string, decimal>();
+            var totalSent = new Dictionary<string, Dictionary<string, decimal>>();
             foreach (var block in node.Chain.Snapshot())
                 foreach (var tx in block.Transactions)
                     if (tx.From != Economics.CoinbaseSender)
-                        totalSent[tx.From] = totalSent.GetValueOrDefault(tx.From) + tx.Amount;
+                    {
+                        if (!totalSent.TryGetValue(tx.From, out var byAsset))
+                            totalSent[tx.From] = byAsset = new Dictionary<string, decimal>();
+                        byAsset[tx.Asset] = byAsset.GetValueOrDefault(tx.Asset) + tx.Amount;
+                    }
 
-            return (balances, totalSent);
+            var assetNames = balances.Values.SelectMany(b => b.Keys)
+                .Concat(totalSent.Values.SelectMany(b => b.Keys))
+                .Append(currentAsset)
+                .Distinct();
+            var assetPrices = assetNames.ToDictionary(a => a, a => node.Chain.PriceForNameAt(a, nextHeight));
+
+            return (balances, currentAsset, totalSent, assetPrices);
         }
 
         /// <summary>
@@ -546,7 +563,7 @@ namespace BitcoinNetworkSimulator
             public int PeerCount { get; init; }
             public int BlocksWon { get; init; }
             public Dictionary<string, decimal> Balances { get; init; } = new();
-            public decimal TotalSent { get; init; }
+            public Dictionary<string, decimal> TotalSent { get; init; } = new();
         }
 
         private sealed class DashboardPool
@@ -659,6 +676,10 @@ namespace BitcoinNetworkSimulator
             public int ReorganizationsObserved { get; init; }
             public List<DashboardFork> Forks { get; init; } = new();
             public List<DashboardReorg> RecentReorganizations { get; init; } = new();
+            /// <summary>The asset currently active on this payload's single canonical view — see <see cref="ComputeLedgerSummary"/>.</summary>
+            public string CurrentAsset { get; init; } = "";
+            /// <summary>Each distinct asset's current $-reference price — see <see cref="ComputeLedgerSummary"/>.</summary>
+            public Dictionary<string, decimal> AssetPrices { get; init; } = new();
             public DashboardScenario? Scenario { get; init; }
         }
 
@@ -722,6 +743,7 @@ namespace BitcoinNetworkSimulator
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--panel-border); white-space: nowrap; }
   th { color: var(--text-dim); font-weight: 500; }
   td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  tr.child-row td { padding-top: 0; padding-bottom: 4px; }
   .role-honest { color: var(--good); }
   .role-other { color: var(--warn); }
   .full-width { grid-column: 1 / -1; }
@@ -744,14 +766,17 @@ namespace BitcoinNetworkSimulator
   .phase-desc { color: var(--text-dim); margin-top: 4px; }
   .phase-groups { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
   .phase-groups .group { display: inline-block; background: var(--bar-bg); border-radius: 6px; padding: 2px 8px; margin: 2px 4px 0 0; color: var(--text); }
-  .explorer-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
-  .explorer-controls select, .explorer-controls input, .explorer-controls button {
+  .explorer-controls, .filters { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .explorer-controls select, .explorer-controls input, .explorer-controls button,
+  .filters select, .filters input, .filters button {
     background: var(--bar-bg); color: var(--text); border: 1px solid var(--panel-border);
     border-radius: 6px; padding: 6px 10px; font-size: 13px;
   }
-  .explorer-controls button { cursor: pointer; }
-  .explorer-controls button:hover { border-color: var(--accent); }
+  .explorer-controls button, .filters button { cursor: pointer; }
+  .explorer-controls button:hover, .filters button:hover { border-color: var(--accent); }
   .explorer-controls input { flex: 1; min-width: 180px; }
+  .filters input { min-width: 140px; }
+  tr.totals-row td { font-weight: 600; border-top: 2px solid var(--panel-border); }
   .explorer-status { color: var(--text-dim); font-size: 12px; }
   .explorer-block { border: 1px solid var(--panel-border); border-radius: 8px; margin-bottom: 6px; overflow: hidden; }
   .explorer-block-row {
@@ -831,12 +856,22 @@ namespace BitcoinNetworkSimulator
     </div>
     <div class=""panel full-width"">
       <h2>All participants</h2>
+      <div class=""filters"">
+        <input id=""filter-node"" type=""text"" placeholder=""filter by node id…"">
+        <select id=""filter-role""></select>
+        <select id=""filter-mines"">
+          <option value="""">Mines: all</option><option value=""yes"">Mines: yes</option><option value=""no"">Mines: no</option>
+        </select>
+        <select id=""filter-pool""></select>
+        <select id=""filter-asset""></select>
+        <button id=""filter-clear"" type=""button"">Clear filters</button>
+      </div>
       <div style=""max-height:420px; overflow-y:auto;"">
         <table>
           <thead><tr>
             <th>Node</th><th>Role</th><th>Mines</th><th>Hash power</th>
             <th>Pool</th><th>Blocks won</th><th>Peers</th><th>Economic weight</th>
-            <th>Balance</th><th>Sent</th>
+            <th>Asset</th><th>Balance</th><th>Value</th><th>Sent</th>
           </tr></thead>
           <tbody id=""all-nodes""></tbody>
         </table>
@@ -897,31 +932,146 @@ function fmtCoins(x) {
   return Number(x).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') || '0';
 }
 
-function fmtBalances(balances) {
-  var assets = Object.keys(balances || {}).filter(function (a) { return balances[a] > 0; });
-  if (!assets.length) return '0';
-  return assets.map(function (a) { return fmtCoins(balances[a]) + ' ' + a; }).join(', ');
+function fmtValue(x) {
+  return '$' + Number(x).toFixed(2);
 }
 
-function renderAllNodes(nodes) {
-  var tbody = document.getElementById('all-nodes');
-  if (!nodes.length) { tbody.innerHTML = '<tr><td colspan=""10"" class=""empty"">No nodes yet.</td></tr>'; return; }
-  tbody.innerHTML = nodes.map(function (n) {
-    var roleClass = n.role === 'Honest' ? 'role-honest' : 'role-other';
-    return '<tr>' +
-      '<td class=""id"">' + n.id + '</td>' +
-      '<td class=""' + roleClass + '"">' + n.role + '</td>' +
-      '<td>' + (n.canMine ? 'yes' : 'no') + '</td>' +
-      '<td>' + n.hashPower + ' (' + fmtPct(n.hashPowerShare) + ')</td>' +
-      '<td>' + (n.pool || '(solo)') + '</td>' +
-      '<td>' + n.blocksWon + '</td>' +
-      '<td>' + n.peerCount + '</td>' +
-      '<td>' + n.economicWeight + '</td>' +
-      '<td>' + fmtBalances(n.balances) + '</td>' +
-      '<td>' + fmtCoins(n.totalSent) + '</td>' +
-      '</tr>';
+// One row per (node, asset) — a node with a dormant balance, or that's sent a since-drained
+// asset, gets more than one. Every row carries the full node context (not just the
+// asset/balance/sent) so a column filter can isolate a single row without losing track of
+// which node it belongs to, and both balance and sent are that row's own asset only — never
+// a flat, cross-asset total repeated on every row for the same node. value is that row's
+// balance converted to the system's $-reference money via assetPrices, so — unlike balance
+// and sent, which stay asset-denominated — it's the one column safe to add across different
+// assets' rows.
+function buildNodeAssetRows(nodes, currentAsset, assetPrices) {
+  var rows = [];
+  nodes.forEach(function (n) {
+    var balances = n.balances || {};
+    var sentByAsset = n.totalSent || {};
+    var assetSet = {};
+    Object.keys(balances).forEach(function (a) { if (balances[a] > 0) assetSet[a] = true; });
+    Object.keys(sentByAsset).forEach(function (a) { if (sentByAsset[a] > 0) assetSet[a] = true; });
+    if (currentAsset) assetSet[currentAsset] = true;
+    var assets = Object.keys(assetSet).sort(function (a, b) { return a === currentAsset ? -1 : b === currentAsset ? 1 : a.localeCompare(b); });
+    assets.forEach(function (asset) {
+      var balance = balances[asset] || 0;
+      var price = (assetPrices || {})[asset] || 0;
+      rows.push({ node: n, asset: asset, balance: balance, sent: sentByAsset[asset] || 0, value: balance * price });
+    });
+  });
+  return rows;
+}
+
+var nodeFilters = { node: '', role: '', mines: '', pool: '', asset: '' };
+
+function rowMatchesFilters(r) {
+  if (nodeFilters.node && r.node.id.toLowerCase().indexOf(nodeFilters.node.toLowerCase()) === -1) return false;
+  if (nodeFilters.role && r.node.role !== nodeFilters.role) return false;
+  if (nodeFilters.mines && (r.node.canMine ? 'yes' : 'no') !== nodeFilters.mines) return false;
+  if (nodeFilters.pool && (r.node.pool || '(solo)') !== nodeFilters.pool) return false;
+  if (nodeFilters.asset && r.asset !== nodeFilters.asset) return false;
+  return true;
+}
+
+function uniqueSorted(values) {
+  var seen = {}, out = [];
+  values.forEach(function (v) { if (!seen[v]) { seen[v] = true; out.push(v); } });
+  return out.sort();
+}
+
+/// Options are drawn from every currently-known row, not just the filtered ones, so picking
+/// one filter never hides the options needed to broaden back out of another.
+function populateFilterSelect(id, values, current) {
+  var sel = document.getElementById(id);
+  if (document.activeElement === sel) return;
+  sel.innerHTML = '<option value="""">All</option>' + values.map(function (v) {
+    return '<option value=""' + escapeHtml(v) + '""' + (v === current ? ' selected' : '') + '>' + escapeHtml(v) + '</option>';
   }).join('');
 }
+
+function sumByAssetText(rows, pick) {
+  var byAsset = {};
+  rows.forEach(function (r) { byAsset[r.asset] = (byAsset[r.asset] || 0) + pick(r); });
+  return Object.keys(byAsset).sort().map(function (a) {
+    return fmtCoins(byAsset[a]) + ' ' + escapeHtml(a);
+  }).join(', ') || '0';
+}
+
+function renderTotalsRow(rows) {
+  var seenNodes = {};
+  rows.forEach(function (r) { seenNodes[r.node.id] = true; });
+  var nodeCount = Object.keys(seenNodes).length;
+
+  var valueTotal = rows.reduce(function (sum, r) { return sum + r.value; }, 0);
+
+  return '<tr class=""totals-row"">' +
+    '<td colspan=""9"">Total — ' + nodeCount + ' node' + (nodeCount === 1 ? '' : 's') +
+    ' (' + rows.length + ' row' + (rows.length === 1 ? '' : 's') + ')</td>' +
+    '<td>' + sumByAssetText(rows, function (r) { return r.balance; }) + '</td>' +
+    '<td>' + fmtValue(valueTotal) + '</td>' +
+    '<td>' + sumByAssetText(rows, function (r) { return r.sent; }) + '</td>' +
+    '</tr>';
+}
+
+var lastAllNodes = [], lastCurrentAsset = '', lastAssetPrices = {};
+
+function renderAllNodes(nodes, currentAsset, assetPrices) {
+  lastAllNodes = nodes;
+  lastCurrentAsset = currentAsset;
+  lastAssetPrices = assetPrices || {};
+
+  var allRows = buildNodeAssetRows(nodes, currentAsset, lastAssetPrices);
+  populateFilterSelect('filter-role', uniqueSorted(allRows.map(function (r) { return r.node.role; })), nodeFilters.role);
+  populateFilterSelect('filter-pool', uniqueSorted(allRows.map(function (r) { return r.node.pool || '(solo)'; })), nodeFilters.pool);
+  populateFilterSelect('filter-asset', uniqueSorted(allRows.map(function (r) { return r.asset; })), nodeFilters.asset);
+
+  var rows = allRows.filter(rowMatchesFilters);
+
+  var tbody = document.getElementById('all-nodes');
+  if (!allRows.length) { tbody.innerHTML = '<tr><td colspan=""12"" class=""empty"">No nodes yet.</td></tr>'; return; }
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan=""12"" class=""empty"">No rows match the current filters.</td></tr>'; return; }
+
+  var html = rows.map(function (r) {
+    var roleClass = r.node.role === 'Honest' ? 'role-honest' : 'role-other';
+    return '<tr>' +
+      '<td class=""id"">' + r.node.id + '</td>' +
+      '<td class=""' + roleClass + '"">' + r.node.role + '</td>' +
+      '<td>' + (r.node.canMine ? 'yes' : 'no') + '</td>' +
+      '<td>' + r.node.hashPower + ' (' + fmtPct(r.node.hashPowerShare) + ')</td>' +
+      '<td>' + (r.node.pool || '(solo)') + '</td>' +
+      '<td>' + r.node.blocksWon + '</td>' +
+      '<td>' + r.node.peerCount + '</td>' +
+      '<td>' + r.node.economicWeight + '</td>' +
+      '<td>' + escapeHtml(r.asset) + '</td>' +
+      '<td>' + fmtCoins(r.balance) + '</td>' +
+      '<td>' + fmtValue(r.value) + '</td>' +
+      '<td>' + fmtCoins(r.sent) + '</td>' +
+      '</tr>';
+  }).join('') + renderTotalsRow(rows);
+
+  tbody.innerHTML = html;
+}
+
+function initFilterControls() {
+  document.getElementById('filter-node').addEventListener('input', function (e) {
+    nodeFilters.node = e.target.value;
+    renderAllNodes(lastAllNodes, lastCurrentAsset, lastAssetPrices);
+  });
+  ['role', 'mines', 'pool', 'asset'].forEach(function (key) {
+    document.getElementById('filter-' + key).addEventListener('change', function (e) {
+      nodeFilters[key] = e.target.value;
+      renderAllNodes(lastAllNodes, lastCurrentAsset, lastAssetPrices);
+    });
+  });
+  document.getElementById('filter-clear').addEventListener('click', function () {
+    nodeFilters = { node: '', role: '', mines: '', pool: '', asset: '' };
+    document.getElementById('filter-node').value = '';
+    document.getElementById('filter-mines').value = '';
+    renderAllNodes(lastAllNodes, lastCurrentAsset, lastAssetPrices);
+  });
+}
+initFilterControls();
 
 function renderForks(forks) {
   var el = document.getElementById('forks');
@@ -1321,7 +1471,7 @@ function refresh() {
     renderForks(s.forks);
     renderReorgs(s.recentReorganizations);
     renderChainGraph(graph);
-    renderAllNodes(s.allNodes);
+    renderAllNodes(s.allNodes, s.currentAsset, s.assetPrices);
     populateExplorerNodeOptions(s.allNodes.map(function (n) { return n.id; }).sort());
   }).catch(function (err) { console.error('dashboard refresh failed', err); });
 }
